@@ -50,8 +50,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
-MODEL_NAME = "PACT-Transition 3.0: zero-aware persistence-anchored process-guided transition model"
-MODEL_VERSION = "3.0.0"
+MODEL_NAME = "TRACE: Transition-Regime Attribution and Calibrated Extrapolation"
 
 Q_MIN, Q_MAX = 1e-4, 5.0
 F_MIN, F_MAX = 1e-4, 1.5
@@ -122,14 +121,14 @@ REQUIRED = [
 class ModelSpec:
     name: str
     gate: float = 0.25
-    hurdle_point_weight: float = 0.0
-    use_mechanism: bool = True
+    occurrence_point_weight: float = 0.0
+    use_scaffold: bool = True
     use_teacher: bool = True
     use_climate: bool = True
     use_coordinates: bool = True
     use_precision_features: bool = True
     use_precision_weights: bool = True
-    use_hurdle: bool = True
+    use_occurrence: bool = True
 
 @dataclass
 class Configuration:
@@ -143,8 +142,8 @@ class Configuration:
     mc_draws: int = 512
     process_trim_quantile: float = 0.975
     integration_steps: int = 16
-    mechanism_multistart: int = 4
-    mechanism_max_nfev: int = 250
+    scaffold_multistart: int = 4
+    scaffold_max_nfev: int = 250
     teacher_folds: int = 3
     teacher_young_trees: int = 240
     teacher_mature_trees: int = 240
@@ -153,12 +152,12 @@ class Configuration:
     teacher_max_depth_mature: int = 6
     teacher_max_depth_joint: int = 9
     distillation_data_weight: float = 0.35
-    hurdle_folds: int = 4
-    hurdle_trees: int = 360
-    hurdle_min_leaf: int = 8
+    occurrence_folds: int = 4
+    occurrence_trees: int = 360
+    occurrence_min_leaf: int = 8
     probability_clip: float = 0.002
-    hurdle_point_weight: float = 0.0
-    mechanistic_gate: float = 0.25
+    occurrence_point_weight: float = 0.0
+    scaffold_gate: float = 0.25
     kernel_gammas: tuple[float,...] = (0.003,0.03)
     kernel_weights: tuple[float,...] = (0.70,0.30)
     young_kernel_ridge: float = 0.10
@@ -168,7 +167,7 @@ class Configuration:
     tune_gate: bool = True
     inner_folds: int = 3
     gate_grid: tuple[float,...] = (0.0,0.10,0.25,0.50,0.75,1.0)
-    hurdle_weight_grid: tuple[float,...] = (0.0,0.25,0.50,0.75,1.0)
+    occurrence_weight_grid: tuple[float,...] = (0.0,0.25,0.50,0.75,1.0)
     tuning_zero_weight: float = 0.20
     repeated_holdouts: int = 30
     repeated_test_fraction: float = 0.25
@@ -184,9 +183,9 @@ class Configuration:
         if profile not in {"smoke","standard","full"}: raise ValueError("profile must be smoke, standard, or full")
         c=cls(profile=profile)
         if profile=="smoke":
-            c.outer_folds=2;c.cluster_bootstrap=30;c.paired_bootstrap=30;c.mc_draws=48;c.mechanism_multistart=1;c.mechanism_max_nfev=70;c.teacher_young_trees=30;c.teacher_mature_trees=30;c.teacher_joint_trees=40;c.hurdle_trees=50;c.repeated_holdouts=2;c.surrogate_splits=3;c.dpi=120
+            c.outer_folds=2;c.cluster_bootstrap=30;c.paired_bootstrap=30;c.mc_draws=48;c.scaffold_multistart=1;c.scaffold_max_nfev=70;c.teacher_young_trees=30;c.teacher_mature_trees=30;c.teacher_joint_trees=40;c.occurrence_trees=50;c.repeated_holdouts=2;c.surrogate_splits=3;c.dpi=120
         elif profile=="standard":
-            c.cluster_bootstrap=500;c.paired_bootstrap=500;c.mc_draws=256;c.mechanism_multistart=2;c.mechanism_max_nfev=180;c.teacher_young_trees=120;c.teacher_mature_trees=120;c.teacher_joint_trees=160;c.hurdle_trees=200;c.repeated_holdouts=10;c.surrogate_splits=10;c.dpi=240
+            c.cluster_bootstrap=500;c.paired_bootstrap=500;c.mc_draws=256;c.scaffold_multistart=2;c.scaffold_max_nfev=180;c.teacher_young_trees=120;c.teacher_mature_trees=120;c.teacher_joint_trees=160;c.occurrence_trees=200;c.repeated_holdouts=10;c.surrogate_splits=10;c.dpi=240
         for k,v in overrides.items():
             if v is not None:setattr(c,k,v)
         return c
@@ -393,7 +392,7 @@ class FeatureTransform:
         return standardized * self.weights if weighted else standardized
 
 @dataclass
-class MechanisticModel:
+class DemographicScaffold:
     climate: ClimateTransform | None
     parameters: np.ndarray
     integration_steps: int
@@ -426,7 +425,7 @@ class MechanisticModel:
         dt = data.dt_years.to_numpy(float)
         step_count = max(1, int(steps))
         h = dt / step_count
-        q, maturation, mortality, rho, mu, a, b = MechanisticModel.rates(parameters, climate_scores)
+        q, maturation, mortality, rho, mu, a, b = DemographicScaffold.rates(parameters, climate_scores)
 
         for _ in range(step_count):
             du = q + rho * v - (mu + maturation) * u - a * u * u
@@ -447,7 +446,7 @@ class MechanisticModel:
         seed: int,
         use_climate: bool = True,
         use_precision_weights: bool = True,
-    ) -> "MechanisticModel":
+    ) -> "DemographicScaffold":
         rng = np.random.default_rng(seed)
         climate = ClimateTransform.fit(data, seed) if use_climate else None
         climate_scores = climate.transform(data) if climate is not None else np.zeros((len(data), 2))
@@ -505,7 +504,7 @@ class MechanisticModel:
         upper = np.array([4, 3, 3, 4, 3, 3, 4, 3, 3, 1, 1, 1, 1], dtype=float)
 
         best = None
-        starts = max(1, int(config.mechanism_multistart))
+        starts = max(1, int(config.scaffold_multistart))
         for start_index in range(starts):
             candidate = initial.copy()
             if start_index > 0:
@@ -517,7 +516,7 @@ class MechanisticModel:
                 bounds=(lower, upper),
                 loss="soft_l1",
                 f_scale=0.70,
-                max_nfev=config.mechanism_max_nfev,
+                max_nfev=config.scaffold_max_nfev,
                 xtol=1e-7,
                 ftol=1e-7,
                 gtol=1e-7,
@@ -527,7 +526,7 @@ class MechanisticModel:
 
         assert best is not None
         if not np.all(np.isfinite(best.x)):
-            raise RuntimeError("Mechanistic parameter estimation returned non-finite values")
+            raise RuntimeError("Demographic scaffold parameter estimation returned non-finite values")
         active = (np.isclose(best.x, lower, atol=5e-4) | np.isclose(best.x, upper, atol=5e-4)).astype(int)
         return cls(
             climate=climate,
@@ -732,13 +731,13 @@ def cross_fitted_teacher_targets(
     return target_u, target_v, audit
 
 @dataclass
-class MultiScaleKernelClosure:
+class MultiScaleKernelDiscrepancy:
     transform: FeatureTransform
     train_features: np.ndarray
     coefficients_base_young: np.ndarray
-    coefficients_mechanism_young: np.ndarray
+    coefficients_scaffold_young: np.ndarray
     coefficients_base_mature: np.ndarray
-    coefficients_mechanism_mature: np.ndarray
+    coefficients_scaffold_mature: np.ndarray
     gammas: tuple[float,...]
     kernel_weights: tuple[float,...]
     ridges: tuple[float,float]
@@ -750,27 +749,27 @@ class MultiScaleKernelClosure:
         for gamma,weight in zip(gammas,weights):out+=weight*np.exp(-gamma*d)
         return out
     @classmethod
-    def fit(cls,data:pd.DataFrame,target_base_young:np.ndarray,target_base_mature:np.ndarray,mechanism_delta_young:np.ndarray,mechanism_delta_mature:np.ndarray,spec:ModelSpec,config:Configuration,seed:int)->"MultiScaleKernelClosure":
+    def fit(cls,data:pd.DataFrame,target_base_young:np.ndarray,target_base_mature:np.ndarray,scaffold_delta_young:np.ndarray,scaffold_delta_mature:np.ndarray,spec:ModelSpec,config:Configuration,seed:int)->"MultiScaleKernelDiscrepancy":
         transform=FeatureTransform.fit(data,spec,config,seed);x=transform.transform(data);k=cls.kernel(x,x,config.kernel_gammas,config.kernel_weights);eye=np.eye(len(data))
-        def solve_pair(target:np.ndarray,mechanism:np.ndarray,ridge:float)->tuple[np.ndarray,np.ndarray]:
+        def solve_pair(target:np.ndarray,scaffold:np.ndarray,ridge:float)->tuple[np.ndarray,np.ndarray]:
             matrix=k+(ridge+config.kernel_jitter)*eye
-            rhs=np.column_stack([target,mechanism])
+            rhs=np.column_stack([target,scaffold])
             try:solution=cho_solve(cho_factor(matrix,lower=True,check_finite=False),rhs,check_finite=False)
             except (LinAlgError,ValueError):solution=np.linalg.solve(matrix+1e-6*eye,rhs)
             return solution[:,0],solution[:,1]
-        bu,mu=solve_pair(target_base_young,mechanism_delta_young,config.young_kernel_ridge);bv,mv=solve_pair(target_base_mature,mechanism_delta_mature,config.mature_kernel_ridge)
+        bu,mu=solve_pair(target_base_young,scaffold_delta_young,config.young_kernel_ridge);bv,mv=solve_pair(target_base_mature,scaffold_delta_mature,config.mature_kernel_ridge)
         return cls(transform,x,bu,mu,bv,mv,config.kernel_gammas,config.kernel_weights,(config.young_kernel_ridge,config.mature_kernel_ridge))
     def predict(self,data:pd.DataFrame,gate:float)->tuple[np.ndarray,np.ndarray]:
         x=self.transform.transform(data);k=self.kernel(x,self.train_features,self.gammas,self.kernel_weights)
-        return k@(self.coefficients_base_young-gate*self.coefficients_mechanism_young),k@(self.coefficients_base_mature-gate*self.coefficients_mechanism_mature)
+        return k@(self.coefficients_base_young-gate*self.coefficients_scaffold_young),k@(self.coefficients_base_mature-gate*self.coefficients_scaffold_mature)
     def predict_basis(self,data:pd.DataFrame)->dict[str,np.ndarray]:
         x=self.transform.transform(data);k=self.kernel(x,self.train_features,self.gammas,self.kernel_weights)
-        return {"base_u":k@self.coefficients_base_young,"mechanism_u":k@self.coefficients_mechanism_young,"base_v":k@self.coefficients_base_mature,"mechanism_v":k@self.coefficients_mechanism_mature}
+        return {"base_u":k@self.coefficients_base_young,"scaffold_u":k@self.coefficients_scaffold_young,"base_v":k@self.coefficients_base_mature,"scaffold_v":k@self.coefficients_scaffold_mature}
     def ood_diagnostics(self,data:pd.DataFrame)->pd.DataFrame:
         x=self.transform.transform(data);d=cdist(x,self.train_features,metric="sqeuclidean");s=self.kernel(x,self.train_features,self.gammas,self.kernel_weights);p=s/np.maximum(s.sum(axis=1,keepdims=True),1e-12)
         return pd.DataFrame({"nearest_feature_distance":np.sqrt(d.min(axis=1)),"max_kernel_similarity":s.max(axis=1),"effective_kernel_neighbors":1/np.maximum(np.sum(p*p,axis=1),1e-12)})
     def mathematical_audit(self)->dict[str,float]:
-        norms={"base_young":float(np.linalg.norm(self.coefficients_base_young,1)),"mechanism_young":float(np.linalg.norm(self.coefficients_mechanism_young,1)),"base_mature":float(np.linalg.norm(self.coefficients_base_mature,1)),"mechanism_mature":float(np.linalg.norm(self.coefficients_mechanism_mature,1))}
+        norms={"base_young":float(np.linalg.norm(self.coefficients_base_young,1)),"scaffold_young":float(np.linalg.norm(self.coefficients_scaffold_young,1)),"base_mature":float(np.linalg.norm(self.coefficients_base_mature,1)),"scaffold_mature":float(np.linalg.norm(self.coefficients_scaffold_mature,1))}
         factor=sum(w*math.sqrt(2*g/math.e) for g,w in zip(self.gammas,self.kernel_weights))*float(np.linalg.norm(self.transform.weights))
         return {**{f"kernel_coefficient_L1_{k}":v for k,v in norms.items()},**{f"finite_Lipschitz_upper_{k}":v*factor for k,v in norms.items()}}
 
@@ -790,11 +789,11 @@ class BinaryProbabilityModel:
     def fit(cls,x:np.ndarray,y:np.ndarray,groups:np.ndarray,config:Configuration,seed:int)->"BinaryProbabilityModel":
         unique=np.unique(y)
         if unique.size<2:return cls([],None,"constant",float(unique[0]),0.0,0.0)
-        n_splits=min(config.hurdle_folds,np.unique(groups).size);oof=np.zeros(len(y));models=[]
+        n_splits=min(config.occurrence_folds,np.unique(groups).size);oof=np.zeros(len(y));models=[]
         if n_splits<2:
-            m=ExtraTreesClassifier(n_estimators=config.hurdle_trees,max_depth=9,min_samples_leaf=config.hurdle_min_leaf,max_features=0.85,class_weight=None,random_state=seed,n_jobs=-1);m.fit(x,y);raw=cls.raw_probability(m,x);return cls([m],None,"identity",None,float(brier_score_loss(y,raw)),float(brier_score_loss(y,raw)))
+            m=ExtraTreesClassifier(n_estimators=config.occurrence_trees,max_depth=9,min_samples_leaf=config.occurrence_min_leaf,max_features=0.85,class_weight=None,random_state=seed,n_jobs=-1);m.fit(x,y);raw=cls.raw_probability(m,x);return cls([m],None,"identity",None,float(brier_score_loss(y,raw)),float(brier_score_loss(y,raw)))
         for fold,(tr,va) in enumerate(GroupKFold(n_splits).split(x,y,groups),1):
-            m=ExtraTreesClassifier(n_estimators=config.hurdle_trees,max_depth=9,min_samples_leaf=config.hurdle_min_leaf,max_features=0.85,class_weight=None,random_state=seed+fold,n_jobs=-1)
+            m=ExtraTreesClassifier(n_estimators=config.occurrence_trees,max_depth=9,min_samples_leaf=config.occurrence_min_leaf,max_features=0.85,class_weight=None,random_state=seed+fold,n_jobs=-1)
             m.fit(x[tr],y[tr]);oof[va]=cls.raw_probability(m,x[va]);models.append(m)
         raw=np.clip(oof,config.probability_clip,1-config.probability_clip)
         if min(np.sum(y==0),np.sum(y==1))>=25 and np.unique(raw).size>=12:
@@ -811,13 +810,13 @@ class BinaryProbabilityModel:
         return np.clip(p,clip,1-clip)
 
 @dataclass
-class HurdleLayer:
+class OccurrenceLayer:
     transform: FeatureTransform
     young: BinaryProbabilityModel
     mature: BinaryProbabilityModel
     probability_clip: float
     @classmethod
-    def fit(cls,data:pd.DataFrame,transform:FeatureTransform,config:Configuration,seed:int)->"HurdleLayer":
+    def fit(cls,data:pd.DataFrame,transform:FeatureTransform,config:Configuration,seed:int)->"OccurrenceLayer":
         x=transform.transform(data);groups=data.siteID.astype(str).to_numpy()
         return cls(transform,BinaryProbabilityModel.fit(x,data.positive_u1.to_numpy(int),groups,config,seed+1),BinaryProbabilityModel.fit(x,data.positive_v1.to_numpy(int),groups,config,seed+2),config.probability_clip)
     def predict(self,data:pd.DataFrame)->tuple[np.ndarray,np.ndarray]:
@@ -826,35 +825,35 @@ class HurdleLayer:
         return {"young_calibration_method":self.young.calibration_method,"mature_calibration_method":self.mature.calibration_method,"young_raw_oof_brier":self.young.raw_oof_brier,"young_calibrated_oof_brier":self.young.calibrated_oof_brier,"mature_raw_oof_brier":self.mature.raw_oof_brier,"mature_calibrated_oof_brier":self.mature.calibrated_oof_brier}
 
 @dataclass
-class HybridTransitionModel:
+class TRACEModel:
     spec: ModelSpec
-    mechanism: MechanisticModel|None
-    closure: MultiScaleKernelClosure
-    hurdle: HurdleLayer|None
+    scaffold: DemographicScaffold|None
+    discrepancy: MultiScaleKernelDiscrepancy
+    occurrence: OccurrenceLayer|None
     teacher_audit: dict[str,Any]
     @classmethod
-    def fit(cls,data:pd.DataFrame,spec:ModelSpec,config:Configuration,seed:int)->"HybridTransitionModel":
-        mechanism=MechanisticModel.fit(data,config,seed+101,spec.use_climate,spec.use_precision_weights) if spec.use_mechanism else None
+    def fit(cls,data:pd.DataFrame,spec:ModelSpec,config:Configuration,seed:int)->"TRACEModel":
+        scaffold=DemographicScaffold.fit(data,config,seed+101,spec.use_climate,spec.use_precision_weights) if spec.use_scaffold else None
         if spec.use_teacher:teacher_u,teacher_v,teacher_audit=cross_fitted_teacher_targets(data,spec,config,seed+202)
         else:teacher_u=data.u1_log.to_numpy(float);teacher_v=data.v1_log.to_numpy(float);teacher_audit={"teacher_used":False}
         base_u=data.u0_log.to_numpy(float);base_v=data.v0_log.to_numpy(float);actual_u=data.u1_log.to_numpy(float);actual_v=data.v1_log.to_numpy(float)
-        mechanism_u,mechanism_v=mechanism.predict(data) if mechanism is not None else (base_u.copy(),base_v.copy())
+        scaffold_u,scaffold_v=scaffold.predict(data) if scaffold is not None else (base_u.copy(),base_v.copy())
         w=config.distillation_data_weight if spec.use_teacher else 1.0
         target_u=(1-w)*teacher_u+w*actual_u-base_u;target_v=(1-w)*teacher_v+w*actual_v-base_v
-        closure=MultiScaleKernelClosure.fit(data,target_u,target_v,mechanism_u-base_u,mechanism_v-base_v,spec,config,seed+303)
-        hurdle=HurdleLayer.fit(data,closure.transform,config,seed+404) if spec.use_hurdle else None
-        if hurdle is not None:teacher_audit={**teacher_audit,**hurdle.audit()}
-        return cls(spec,mechanism,closure,hurdle,teacher_audit)
-    def components(self,data:pd.DataFrame,gate:float|None=None,hurdle_point_weight:float|None=None)->dict[str,np.ndarray]:
-        g=self.spec.gate if gate is None else float(gate);hw=self.spec.hurdle_point_weight if hurdle_point_weight is None else float(hurdle_point_weight)
-        base_u=data.u0_log.to_numpy(float);base_v=data.v0_log.to_numpy(float);mechanism_u,mechanism_v=self.mechanism.predict(data) if self.mechanism is not None else (base_u.copy(),base_v.copy())
-        closure_u,closure_v=self.closure.predict(data,g);gmu=g*(mechanism_u-base_u);gmv=g*(mechanism_v-base_v);mag_u=np.maximum(base_u+gmu+closure_u,0);mag_v=np.maximum(base_v+gmv+closure_v,0)
-        pu,pv=self.hurdle.predict(data) if self.hurdle is not None else (np.ones(len(data)),np.ones(len(data)))
+        discrepancy=MultiScaleKernelDiscrepancy.fit(data,target_u,target_v,scaffold_u-base_u,scaffold_v-base_v,spec,config,seed+303)
+        occurrence=OccurrenceLayer.fit(data,discrepancy.transform,config,seed+404) if spec.use_occurrence else None
+        if occurrence is not None:teacher_audit={**teacher_audit,**occurrence.audit()}
+        return cls(spec,scaffold,discrepancy,occurrence,teacher_audit)
+    def components(self,data:pd.DataFrame,gate:float|None=None,occurrence_point_weight:float|None=None)->dict[str,np.ndarray]:
+        g=self.spec.gate if gate is None else float(gate);hw=self.spec.occurrence_point_weight if occurrence_point_weight is None else float(occurrence_point_weight)
+        base_u=data.u0_log.to_numpy(float);base_v=data.v0_log.to_numpy(float);scaffold_u,scaffold_v=self.scaffold.predict(data) if self.scaffold is not None else (base_u.copy(),base_v.copy())
+        discrepancy_u,discrepancy_v=self.discrepancy.predict(data,g);gmu=g*(scaffold_u-base_u);gmv=g*(scaffold_v-base_v);mag_u=np.maximum(base_u+gmu+discrepancy_u,0);mag_v=np.maximum(base_v+gmv+discrepancy_v,0)
+        pu,pv=self.occurrence.predict(data) if self.occurrence is not None else (np.ones(len(data)),np.ones(len(data)))
         hu=np.log1p(pu*np.expm1(mag_u));hv=np.log1p(pv*np.expm1(mag_v));pred_u=(1-hw)*mag_u+hw*hu;pred_v=(1-hw)*mag_v+hw*hv
-        return {"base_u":base_u,"base_v":base_v,"mechanism_u":mechanism_u,"mechanism_v":mechanism_v,"mechanism_delta_u":mechanism_u-base_u,"mechanism_delta_v":mechanism_v-base_v,"gated_mechanism_u":gmu,"gated_mechanism_v":gmv,"closure_u":closure_u,"closure_v":closure_v,"magnitude_u":mag_u,"magnitude_v":mag_v,"positive_probability_u":pu,"positive_probability_v":pv,"hurdle_expected_u":hu,"hurdle_expected_v":hv,"pred_u":pred_u,"pred_v":pred_v}
+        return {"base_u":base_u,"base_v":base_v,"scaffold_u":scaffold_u,"scaffold_v":scaffold_v,"scaffold_delta_u":scaffold_u-base_u,"scaffold_delta_v":scaffold_v-base_v,"gated_scaffold_u":gmu,"gated_scaffold_v":gmv,"discrepancy_u":discrepancy_u,"discrepancy_v":discrepancy_v,"magnitude_u":mag_u,"magnitude_v":mag_v,"positive_probability_u":pu,"positive_probability_v":pv,"probability_adjusted_u":hu,"probability_adjusted_v":hv,"pred_u":pred_u,"pred_v":pred_v}
     def point_prediction_frame(self,data:pd.DataFrame)->pd.DataFrame:
-        c=self.components(data);o=self.closure.ood_diagnostics(data)
-        frame=pd.DataFrame({"pred_u_log":c["pred_u"],"pred_v_log":c["pred_v"],"mechanism_u_log":c["mechanism_u"],"mechanism_v_log":c["mechanism_v"],"mechanism_delta_u_log":c["mechanism_delta_u"],"mechanism_delta_v_log":c["mechanism_delta_v"],"gated_mechanism_u_log":c["gated_mechanism_u"],"gated_mechanism_v_log":c["gated_mechanism_v"],"closure_u_log":c["closure_u"],"closure_v_log":c["closure_v"],"magnitude_u_log":c["magnitude_u"],"magnitude_v_log":c["magnitude_v"],"positive_probability_u":c["positive_probability_u"],"positive_probability_v":c["positive_probability_v"],"hurdle_expected_u_log":c["hurdle_expected_u"],"hurdle_expected_v_log":c["hurdle_expected_v"]})
+        c=self.components(data);o=self.discrepancy.ood_diagnostics(data)
+        frame=pd.DataFrame({"pred_u_log":c["pred_u"],"pred_v_log":c["pred_v"],"scaffold_u_log":c["scaffold_u"],"scaffold_v_log":c["scaffold_v"],"scaffold_delta_u_log":c["scaffold_delta_u"],"scaffold_delta_v_log":c["scaffold_delta_v"],"gated_scaffold_u_log":c["gated_scaffold_u"],"gated_scaffold_v_log":c["gated_scaffold_v"],"discrepancy_u_log":c["discrepancy_u"],"discrepancy_v_log":c["discrepancy_v"],"magnitude_u_log":c["magnitude_u"],"magnitude_v_log":c["magnitude_v"],"positive_probability_u":c["positive_probability_u"],"positive_probability_v":c["positive_probability_v"],"probability_adjusted_u_log":c["probability_adjusted_u"],"probability_adjusted_v_log":c["probability_adjusted_v"]})
         return pd.concat([frame,o.reset_index(drop=True)],axis=1)
 
 @dataclass
@@ -1101,7 +1100,7 @@ class CalibrationState:
     mode: str
 
 def fit_calibration_state(
-    model: HybridTransitionModel,
+    model: TRACEModel,
     calibration: pd.DataFrame,
     config: Configuration,
     seed: int,
@@ -1147,7 +1146,7 @@ def fit_calibration_state(
     )
 
 def predict_with_calibration(
-    model: HybridTransitionModel,
+    model: TRACEModel,
     data: pd.DataFrame,
     calibration: CalibrationState,
     config: Configuration,
@@ -1217,23 +1216,23 @@ def tuning_score(data:pd.DataFrame,pred_u:np.ndarray,pred_v:np.ndarray,zero_weig
 
 def tune_gate_nested(data:pd.DataFrame,base_spec:ModelSpec,config:Configuration,seed:int)->tuple[float,float,pd.DataFrame]:
     groups=data.siteID.astype(str).to_numpy();splits=min(config.inner_folds,np.unique(groups).size)
-    if splits<2:return base_spec.gate,base_spec.hurdle_point_weight,pd.DataFrame()
+    if splits<2:return base_spec.gate,base_spec.occurrence_point_weight,pd.DataFrame()
     rows=[]
     for inner,(tr,va) in enumerate(GroupKFold(splits).split(np.arange(len(data)),groups=groups),1):
-        train=data.iloc[tr].reset_index(drop=True);valid=data.iloc[va].reset_index(drop=True);model=HybridTransitionModel.fit(train,replace(base_spec,gate=0.0,hurdle_point_weight=0.0),config,seed+inner*100000)
+        train=data.iloc[tr].reset_index(drop=True);valid=data.iloc[va].reset_index(drop=True);model=TRACEModel.fit(train,replace(base_spec,gate=0.0,occurrence_point_weight=0.0),config,seed+inner*100000)
         for gate in config.gate_grid:
-            for weight in config.hurdle_weight_grid:
+            for weight in config.occurrence_weight_grid:
                 c=model.components(valid,gate,weight);score,overall,zero=tuning_score(valid,c["pred_u"],c["pred_v"],config.tuning_zero_weight)
-                rows.append({"gate":float(gate),"hurdle_point_weight":float(weight),"inner_fold":inner,"objective":score,"overall_normalized_RMSE":overall,"zero_origin_normalized_RMSE":zero})
-    table=pd.DataFrame(rows);summary=table.groupby(["gate","hurdle_point_weight"],as_index=False).agg(objective=("objective","mean"),objective_sd=("objective","std"),overall_normalized_RMSE=("overall_normalized_RMSE","mean"),zero_origin_normalized_RMSE=("zero_origin_normalized_RMSE","mean"))
-    best=summary.sort_values(["objective","gate","hurdle_point_weight"]).iloc[0];gate=float(best.gate);weight=float(best.hurdle_point_weight);table["selected"]=(table.gate==gate)&(table.hurdle_point_weight==weight);summary["inner_fold"]=0;summary["selected"]=(summary.gate==gate)&(summary.hurdle_point_weight==weight)
+                rows.append({"gate":float(gate),"occurrence_point_weight":float(weight),"inner_fold":inner,"objective":score,"overall_normalized_RMSE":overall,"zero_origin_normalized_RMSE":zero})
+    table=pd.DataFrame(rows);summary=table.groupby(["gate","occurrence_point_weight"],as_index=False).agg(objective=("objective","mean"),objective_sd=("objective","std"),overall_normalized_RMSE=("overall_normalized_RMSE","mean"),zero_origin_normalized_RMSE=("zero_origin_normalized_RMSE","mean"))
+    best=summary.sort_values(["objective","gate","occurrence_point_weight"]).iloc[0];gate=float(best.gate);weight=float(best.occurrence_point_weight);table["selected"]=(table.gate==gate)&(table.occurrence_point_weight==weight);summary["inner_fold"]=0;summary["selected"]=(summary.gate==gate)&(summary.occurrence_point_weight==weight)
     return gate,weight,pd.concat([table,summary],ignore_index=True,sort=False)
 
 def primary_spec(config:Configuration)->ModelSpec:
-    return ModelSpec("PACT-Transition",config.mechanistic_gate,config.hurdle_point_weight)
+    return ModelSpec("TRACE",config.scaffold_gate,config.occurrence_point_weight)
 
 def standard_ablation_specs(config:Configuration,profile:str)->list[ModelSpec]:
-    core=[ModelSpec("Closure only (refit)",0.0,0.0,False,True,True,True,True,True,True),ModelSpec("Full without teacher",config.mechanistic_gate,config.hurdle_point_weight,True,False),ModelSpec("Full without climate",config.mechanistic_gate,config.hurdle_point_weight,True,True,False),ModelSpec("Full without coordinates",config.mechanistic_gate,config.hurdle_point_weight,True,True,True,False),ModelSpec("Precision weights only",config.mechanistic_gate,config.hurdle_point_weight,True,True,True,True,False,True),ModelSpec("Precision predictors only",config.mechanistic_gate,config.hurdle_point_weight,True,True,True,True,True,False),ModelSpec("Full without precision",config.mechanistic_gate,config.hurdle_point_weight,True,True,True,True,False,False)]
+    core=[ModelSpec("Discrepancy only, refit",0.0,0.0,False,True,True,True,True,True,True),ModelSpec("Without teacher smoothing",config.scaffold_gate,config.occurrence_point_weight,True,False),ModelSpec("Without climate",config.scaffold_gate,config.occurrence_point_weight,True,True,False),ModelSpec("Without coordinates",config.scaffold_gate,config.occurrence_point_weight,True,True,True,False),ModelSpec("Sampling-precision weights only",config.scaffold_gate,config.occurrence_point_weight,True,True,True,True,False,True),ModelSpec("Sampling-precision predictors only",config.scaffold_gate,config.occurrence_point_weight,True,True,True,True,True,False),ModelSpec("Without sampling precision",config.scaffold_gate,config.occurrence_point_weight,True,True,True,True,False,False)]
     return core[:2] if profile=="smoke" else core
 
 def prediction_columns_for_model(name:str)->tuple[str,str]:
@@ -1245,33 +1244,33 @@ def run_outer_cv(data:pd.DataFrame,config:Configuration)->dict[str,pd.DataFrame]
     for fold,(train_idx,test_idx) in enumerate(GroupKFold(n_splits).split(indices,groups=groups),1):
         outer=data.iloc[train_idx].reset_index(drop=True);test=data.iloc[test_idx].reset_index(drop=True);cr,ca=split_core_calibration(outer,config.calibration_fraction,config.seed+fold*101);core=outer.iloc[cr].reset_index(drop=True);cal=outer.iloc[ca].reset_index(drop=True)
         if not validate_no_group_overlap(core,cal,test):raise RuntimeError(f"site leakage in fold {fold}")
-        base=primary_spec(config);gate,hw,tuning=tune_gate_nested(core,base,config,config.seed+fold*1000000) if config.tune_gate else (base.gate,base.hurdle_point_weight,pd.DataFrame());spec=replace(base,gate=gate,hurdle_point_weight=hw)
+        base=primary_spec(config);gate,hw,tuning=tune_gate_nested(core,base,config,config.seed+fold*1000000) if config.tune_gate else (base.gate,base.occurrence_point_weight,pd.DataFrame());spec=replace(base,gate=gate,occurrence_point_weight=hw)
         if not tuning.empty:tuning.insert(0,"outer_fold",fold);tunings.append(tuning)
-        model=HybridTransitionModel.fit(core,spec,config,config.seed+fold*100000);state=fit_calibration_state(model,cal,config,config.seed+fold*100000+50000);pred,draw_audit=predict_with_calibration(model,test,state,config,config.seed+fold*100000+90000)
+        model=TRACEModel.fit(core,spec,config,config.seed+fold*100000);state=fit_calibration_state(model,cal,config,config.seed+fold*100000+50000);pred,draw_audit=predict_with_calibration(model,test,state,config,config.seed+fold*100000+90000)
         keep=["row_id","transition_id","siteID","plotID","dt_years","log_dt","event_year","decimalLatitude","decimalLongitude","u0_kha","v0_kha","u1_kha","v1_kha","u0_log","v0_log","u1_log","v1_log","zero_u0","zero_v0","positive_u1","positive_v1","young_area_precision","mature_area_precision",*RAW_CLIMATE_MODEL]
         out=test[keep].copy();out.insert(1,"fold",fold);pu,pv=prediction_columns_for_model(spec.name);out[pu]=pred.pred_u_log.to_numpy();out[pv]=pred.pred_v_log.to_numpy()
         for col in pred.columns:
             if col not in {"pred_u_log","pred_v_log"}:out[col]=pred[col].to_numpy()
         pu,pv=prediction_columns_for_model("Persistence");out[pu]=out.u0_log;out[pv]=out.v0_log
-        pu,pv=prediction_columns_for_model("Mechanistic ODE only");out[pu]=pred.mechanism_u_log;out[pv]=pred.mechanism_v_log
-        pu,pv=prediction_columns_for_model("Hurdle expected point");out[pu]=pred.hurdle_expected_u_log;out[pv]=pred.hurdle_expected_v_log
+        pu,pv=prediction_columns_for_model("Demographic scaffold only");out[pu]=pred.scaffold_u_log;out[pv]=pred.scaffold_v_log
+        pu,pv=prediction_columns_for_model("Probability-adjusted point magnitude");out[pu]=pred.probability_adjusted_u_log;out[pv]=pred.probability_adjusted_v_log
         for j,ab in enumerate(standard_ablation_specs(config,config.profile),1):
-            ab=replace(ab,hurdle_point_weight=hw)
-            if ab.use_mechanism:ab=replace(ab,gate=gate)
-            m=HybridTransitionModel.fit(core,ab,config,config.seed+fold*100000+j*7000);c=m.components(test);au,av=prediction_columns_for_model(ab.name);out[au]=c["pred_u"];out[av]=c["pred_v"]
+            ab=replace(ab,occurrence_point_weight=hw)
+            if ab.use_scaffold:ab=replace(ab,gate=gate)
+            m=TRACEModel.fit(core,ab,config,config.seed+fold*100000+j*7000);c=m.components(test);au,av=prediction_columns_for_model(ab.name);out[au]=c["pred_u"];out[av]=c["pred_v"]
         benchmark_spec=replace(spec,name="benchmark")
         for j,name in enumerate(["Extra Trees direct","Histogram boosting direct","Ridge direct"],1):
             b=DirectBenchmark.fit(name,core,benchmark_spec,config,config.seed+fold*100000+50000+j*1000);bu,bv=b.predict(test);cu,cv=prediction_columns_for_model(name);out[cu]=bu;out[cv]=bv
         predictions.append(out);sets=[set(x.siteID.astype(str)) for x in (outer,core,cal,test)]
-        audits.append({"fold":fold,"outer_train_rows":len(outer),"core_rows":len(core),"calibration_rows":len(cal),"test_rows":len(test),"outer_train_sites":len(sets[0]),"core_sites":len(sets[1]),"calibration_sites":len(sets[2]),"test_sites":len(sets[3]),"train_test_site_overlap":len(sets[0]&sets[3]),"core_calibration_site_overlap":len(sets[1]&sets[2]),"core_test_site_overlap":len(sets[1]&sets[3]),"calibration_test_site_overlap":len(sets[2]&sets[3]),"selected_gate":gate,"selected_hurdle_point_weight":hw,"conformal_mode":config.conformal_mode,"conformal_q_young":state.conformal_q_young,"conformal_q_mature":state.conformal_q_mature,**draw_audit,**model.closure.mathematical_audit(),**{f"stochastic_{k}":v for k,v in state.stochastic.items()},**{f"hurdle_{k}":v for k,v in (model.hurdle.audit() if model.hurdle else {}).items()}})
-        if model.mechanism is not None:
-            parameters.append(model.mechanism.parameter_table(f"outer_fold_{fold}"));rates.append(climate_rate_response(model.mechanism,f"outer_fold_{fold}"))
-            if model.mechanism.climate is not None:pcas.append(model.mechanism.climate.loading_table(f"outer_fold_{fold}_mechanism"))
-        if model.closure.transform.climate is not None:pcas.append(model.closure.transform.climate.loading_table(f"outer_fold_{fold}_closure"))
+        audits.append({"fold":fold,"outer_train_rows":len(outer),"core_rows":len(core),"calibration_rows":len(cal),"test_rows":len(test),"outer_train_sites":len(sets[0]),"core_sites":len(sets[1]),"calibration_sites":len(sets[2]),"test_sites":len(sets[3]),"train_test_site_overlap":len(sets[0]&sets[3]),"core_calibration_site_overlap":len(sets[1]&sets[2]),"core_test_site_overlap":len(sets[1]&sets[3]),"calibration_test_site_overlap":len(sets[2]&sets[3]),"selected_gate":gate,"selected_occurrence_point_weight":hw,"conformal_mode":config.conformal_mode,"conformal_q_young":state.conformal_q_young,"conformal_q_mature":state.conformal_q_mature,**draw_audit,**model.discrepancy.mathematical_audit(),**{f"stochastic_{k}":v for k,v in state.stochastic.items()},**{f"occurrence_{k}":v for k,v in (model.occurrence.audit() if model.occurrence else {}).items()}})
+        if model.scaffold is not None:
+            parameters.append(model.scaffold.parameter_table(f"outer_fold_{fold}"));rates.append(climate_rate_response(model.scaffold,f"outer_fold_{fold}"))
+            if model.scaffold.climate is not None:pcas.append(model.scaffold.climate.loading_table(f"outer_fold_{fold}_scaffold"))
+        if model.discrepancy.transform.climate is not None:pcas.append(model.discrepancy.transform.climate.loading_table(f"outer_fold_{fold}_discrepancy"))
         ct=state.score_table.copy();ct.insert(0,"fold",fold);ct["q_young"]=state.conformal_q_young;ct["q_mature"]=state.conformal_q_mature;calibrations.append(ct)
     oof=pd.concat(predictions,ignore_index=True).sort_values("row_id").reset_index(drop=True)
     if len(oof)!=len(data) or oof.row_id.duplicated().any():raise RuntimeError("outer CV failed")
-    return {"OOF_Predictions":oof,"CV_Audit":pd.DataFrame(audits),"Fold_Parameters":pd.concat(parameters,ignore_index=True) if parameters else pd.DataFrame(),"Calibration_Scores":pd.concat(calibrations,ignore_index=True) if calibrations else pd.DataFrame(),"Gate_Tuning":pd.concat(tunings,ignore_index=True) if tunings else pd.DataFrame(),"Fold_Climate_Rates":pd.concat(rates,ignore_index=True) if rates else pd.DataFrame(),"Fold_PCA_Loadings":pd.concat(pcas,ignore_index=True) if pcas else pd.DataFrame()}
+    return {"OOF_Predictions":oof,"CV_Audit":pd.DataFrame(audits),"Fold_Parameters":pd.concat(parameters,ignore_index=True) if parameters else pd.DataFrame(),"Calibration_Scores":pd.concat(calibrations,ignore_index=True) if calibrations else pd.DataFrame(),"Gate_Occurrence_Tuning":pd.concat(tunings,ignore_index=True) if tunings else pd.DataFrame(),"Fold_Climate_Rates":pd.concat(rates,ignore_index=True) if rates else pd.DataFrame(),"Fold_PCA_Loadings":pd.concat(pcas,ignore_index=True) if pcas else pd.DataFrame()}
 
 def discover_models(oof: pd.DataFrame) -> dict[str, tuple[str, str]]:
     models: dict[str, tuple[str, str]] = {}
@@ -1311,17 +1310,17 @@ def metric_values(
 
 def model_label_from_key(key: str) -> str:
     mapping = {
-        "pact_transition": "PACT-Transition",
+        "trace": "TRACE",
         "persistence": "Persistence",
-        "mechanistic_ode_only": "Mechanistic ODE only",
-        "hurdle_expected_point": "Hurdle expected point",
-        "closure_only_refit": "Closure only (refit)",
-        "full_without_teacher": "Full without teacher",
-        "full_without_climate": "Full without climate",
-        "full_without_coordinates": "Full without coordinates",
-        "precision_weights_only": "Precision weights only",
-        "precision_predictors_only": "Precision predictors only",
-        "full_without_precision": "Full without precision",
+        "demographic_scaffold_only": "Demographic scaffold only",
+        "probability_adjusted_point": "Probability-adjusted point magnitude",
+        "discrepancy_only_refit": "Discrepancy only, refit",
+        "without_teacher_smoothing": "Without teacher smoothing",
+        "without_climate": "Without climate",
+        "without_coordinates": "Without coordinates",
+        "sampling_precision_weights_only": "Sampling-precision weights only",
+        "sampling_precision_predictors_only": "Sampling-precision predictors only",
+        "without_sampling_precision": "Without sampling precision",
         "extra_trees_direct": "Extra Trees direct",
         "histogram_boosting_direct": "Histogram boosting direct",
         "ridge_direct": "Ridge direct",
@@ -1363,7 +1362,7 @@ def model_metrics_table(oof: pd.DataFrame, config: Configuration) -> pd.DataFram
             y = oof[f"{key}1_log"].to_numpy(float)
             prediction = oof[prediction_column].to_numpy(float)
             lower = upper = None
-            if model_key == "pact_transition":
+            if model_key == "trace":
                 lower = oof[f"lower_{key}_log"].to_numpy(float)
                 upper = oof[f"upper_{key}_log"].to_numpy(float)
             estimates = metric_values(y, prediction, lower, upper, config.interval)
@@ -1395,7 +1394,7 @@ def model_metrics_table(oof: pd.DataFrame, config: Configuration) -> pd.DataFram
 
 def paired_model_comparisons(oof: pd.DataFrame, config: Configuration) -> pd.DataFrame:
     models = discover_models(oof)
-    primary = models.get("pact_transition")
+    primary = models.get("trace")
     if primary is None:
         return pd.DataFrame()
     sites = oof.siteID.astype(str).to_numpy()
@@ -1404,7 +1403,7 @@ def paired_model_comparisons(oof: pd.DataFrame, config: Configuration) -> pd.Dat
     rng = np.random.default_rng(config.seed + 700_000)
     rows = []
     for model_key, columns in models.items():
-        if model_key == "pact_transition":
+        if model_key == "trace":
             continue
         for stage, key, primary_column, comparison_column in [
             ("young", "u", primary[0], columns[0]),
@@ -1439,7 +1438,7 @@ def paired_model_comparisons(oof: pd.DataFrame, config: Configuration) -> pd.Dat
 
 def fold_metrics(oof: pd.DataFrame, config: Configuration) -> pd.DataFrame:
     rows = []
-    primary_u, primary_v = prediction_columns_for_model("PACT-Transition")
+    primary_u, primary_v = prediction_columns_for_model("TRACE")
     persistence_u, persistence_v = prediction_columns_for_model("Persistence")
     for fold, frame in oof.groupby("fold"):
         for stage, key, prediction_column, persistence_column in [
@@ -1469,7 +1468,7 @@ def fold_metrics(oof: pd.DataFrame, config: Configuration) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 def grouped_skill(oof: pd.DataFrame, group: str, config: Configuration) -> pd.DataFrame:
-    primary_u, primary_v = prediction_columns_for_model("PACT-Transition")
+    primary_u, primary_v = prediction_columns_for_model("TRACE")
     persistence_u, persistence_v = prediction_columns_for_model("Persistence")
     rows = []
     for group_value, frame in oof.groupby(group, observed=True):
@@ -1548,39 +1547,39 @@ def interval_calibration_diagnostics(oof:pd.DataFrame,config:Configuration)->pd.
     return pd.DataFrame(rows)
 
 def transition_regime_analysis(oof:pd.DataFrame,config:Configuration)->pd.DataFrame:
-    models=discover_models(oof);full=models.get("pact_transition");persistence=models.get("persistence");closure=models.get("closure_only_refit")
+    models=discover_models(oof);full=models.get("trace");persistence=models.get("persistence");discrepancy=models.get("discrepancy_only_refit")
     if full is None or persistence is None:return pd.DataFrame()
     rows=[]
     for stage,key,index in [("young","u",0),("mature","v",1)]:
         start=oof[f"zero_{key}0"].to_numpy(int)==0;end=oof[f"positive_{key}1"].to_numpy(int)==1
         labels=np.select([~start&~end,~start&end,start&~end,start&end],["zero_to_zero","zero_to_positive","positive_to_zero","positive_to_positive"],default="unknown")
         for regime in np.unique(labels):
-            mask=labels==regime;y=oof.loc[mask,f"{key}1_log"].to_numpy(float);pf=oof.loc[mask,full[index]].to_numpy(float);pp=oof.loc[mask,persistence[index]].to_numpy(float);rf=float(np.sqrt(mean_squared_error(y,pf)));rp=float(np.sqrt(mean_squared_error(y,pp)));row={"stage":stage,"regime":regime,"transitions":int(mask.sum()),"sites":int(oof.loc[mask,"siteID"].nunique()),"PACT_RMSE":rf,"Persistence_RMSE":rp,"skill_vs_persistence":1-rf/rp if rp>1e-12 else np.nan}
-            if closure is not None:
-                rc=float(np.sqrt(mean_squared_error(y,oof.loc[mask,closure[index]])));row.update({"Closure_RMSE":rc,"incremental_skill_vs_closure":1-rf/rc if rc>1e-12 else np.nan})
+            mask=labels==regime;y=oof.loc[mask,f"{key}1_log"].to_numpy(float);pf=oof.loc[mask,full[index]].to_numpy(float);pp=oof.loc[mask,persistence[index]].to_numpy(float);rf=float(np.sqrt(mean_squared_error(y,pf)));rp=float(np.sqrt(mean_squared_error(y,pp)));row={"stage":stage,"regime":regime,"transitions":int(mask.sum()),"sites":int(oof.loc[mask,"siteID"].nunique()),"TRACE_RMSE":rf,"Persistence_RMSE":rp,"skill_vs_persistence":1-rf/rp if rp>1e-12 else np.nan}
+            if discrepancy is not None:
+                rc=float(np.sqrt(mean_squared_error(y,oof.loc[mask,discrepancy[index]])));row.update({"Discrepancy_RMSE":rc,"incremental_skill_vs_discrepancy":1-rf/rc if rc>1e-12 else np.nan})
             rows.append(row)
     return pd.DataFrame(rows)
 
 def contribution_evidence(oof:pd.DataFrame,metrics:pd.DataFrame,paired:pd.DataFrame)->pd.DataFrame:
-    rows=[];comparisons=[("mechanism","Closure only (refit)"),("climate","Full without climate"),("coordinates","Full without coordinates"),("precision","Full without precision"),("teacher","Full without teacher")]
+    rows=[];comparisons=[("scaffold","Discrepancy only, refit"),("climate","Without climate"),("coordinates","Without coordinates"),("precision","Without sampling precision"),("teacher","Without teacher smoothing")]
     for component,comparison in comparisons:
         for stage in ("young","mature"):
-            f=metrics[(metrics.model=="PACT-Transition")&(metrics.stage==stage)&(metrics.metric=="RMSE_log1p")];c=metrics[(metrics.model==comparison)&(metrics.stage==stage)&(metrics.metric=="RMSE_log1p")]
+            f=metrics[(metrics.model=="TRACE")&(metrics.stage==stage)&(metrics.metric=="RMSE_log1p")];c=metrics[(metrics.model==comparison)&(metrics.stage==stage)&(metrics.metric=="RMSE_log1p")]
             if f.empty or c.empty:continue
             rf=float(f.estimate.iloc[0]);rc=float(c.estimate.iloc[0]);p=paired[(paired.stage==stage)&(paired.comparison_model==comparison)]
             rows.append({"component":component,"stage":stage,"full_RMSE":rf,"comparison_RMSE":rc,"RMSE_gain":rc-rf,"relative_gain":1-rf/rc if rc>0 else np.nan,"bootstrap_probability_full_better":float(p.probability_primary_better.iloc[0]) if not p.empty else np.nan})
-    for stage,key in [("young","u"),("mature","v")]:rows.append({"component":"magnitude_decomposition","stage":stage,"full_RMSE":np.nan,"comparison_RMSE":np.nan,"RMSE_gain":float(np.mean(np.abs(oof[f"gated_mechanism_{key}_log"]))),"relative_gain":float(np.mean(np.abs(oof[f"closure_{key}_log"]))),"bootstrap_probability_full_better":np.nan})
+    for stage,key in [("young","u"),("mature","v")]:rows.append({"component":"magnitude_decomposition","stage":stage,"full_RMSE":np.nan,"comparison_RMSE":np.nan,"RMSE_gain":float(np.mean(np.abs(oof[f"gated_scaffold_{key}_log"]))),"relative_gain":float(np.mean(np.abs(oof[f"discrepancy_{key}_log"]))),"bootstrap_probability_full_better":np.nan})
     return pd.DataFrame(rows)
 
 def research_gap_evidence(metrics:pd.DataFrame,contribution:pd.DataFrame,regimes:pd.DataFrame,calibration:pd.DataFrame,repeated:pd.DataFrame,surrogate:pd.DataFrame)->pd.DataFrame:
     rows=[]
     for stage in ("young","mature"):
-        f=metrics[(metrics.model=="PACT-Transition")&(metrics.stage==stage)&(metrics.metric=="RMSE_log1p")];p=metrics[(metrics.model=="Persistence")&(metrics.stage==stage)&(metrics.metric=="RMSE_log1p")]
+        f=metrics[(metrics.model=="TRACE")&(metrics.stage==stage)&(metrics.metric=="RMSE_log1p")];p=metrics[(metrics.model=="Persistence")&(metrics.stage==stage)&(metrics.metric=="RMSE_log1p")]
         if not f.empty and not p.empty:
             skill=1-float(f.estimate.iloc[0])/float(p.estimate.iloc[0]);rows.append({"gap":"unseen-site transition prediction","stage":stage,"evidence":skill,"status":"supported" if skill>0.05 else "weak","claim":f"Site-blocked RMSE skill over persistence was {skill:.1%}."})
-        m=contribution[(contribution.component=="mechanism")&(contribution.stage==stage)]
+        m=contribution[(contribution.component=="scaffold")&(contribution.stage==stage)]
         if not m.empty:
-            gain=float(m.relative_gain.iloc[0]);prob=float(m.bootstrap_probability_full_better.iloc[0]);rows.append({"gap":"incremental value of mechanistic structure","stage":stage,"evidence":gain,"status":"supported" if gain>0.01 and prob>=0.95 else "not supported","claim":f"The ODE added {gain:.1%} RMSE skill beyond the independently refitted closure."})
+            gain=float(m.relative_gain.iloc[0]);prob=float(m.bootstrap_probability_full_better.iloc[0]);rows.append({"gap":"incremental value of the demographic scaffold","stage":stage,"evidence":gain,"status":"supported" if gain>0.01 and prob>=0.95 else "not supported","claim":f"The demographic scaffold added {gain:.1%} RMSE skill beyond the independently refitted discrepancy."})
         c=contribution[(contribution.component=="climate")&(contribution.stage==stage)]
         if not c.empty:
             gain=float(c.relative_gain.iloc[0]);prob=float(c.bootstrap_probability_full_better.iloc[0]);rows.append({"gap":"out-of-site predictive value of realized climate","stage":stage,"evidence":gain,"status":"supported" if gain>0.01 and prob>=0.95 else "not supported","claim":f"Climate added {gain:.1%} RMSE skill after site blocking."})
@@ -1592,7 +1591,7 @@ def research_gap_evidence(metrics:pd.DataFrame,contribution:pd.DataFrame,regimes
             cov=float(q.simultaneous_site_coverage.iloc[0]);rows.append({"gap":"site-aware predictive uncertainty","stage":stage,"evidence":cov,"status":"supported" if abs(cov-float(q.nominal.iloc[0]))<=0.10 else "partial","claim":f"Simultaneous site coverage was {cov:.1%} at nominal {float(q.nominal.iloc[0]):.0%}."})
         s=surrogate[surrogate.stage==stage]
         if not s.empty:
-            r=float(s.grouped_OOF_R2.iloc[0]);n=int(s.claimable_terms.iloc[0]);rows.append({"gap":"interpretable model discrepancy","stage":stage,"evidence":r,"status":"supported" if r>=0.70 and n>0 else "partial","claim":f"The sparse closure surrogate achieved grouped OOF R²={r:.3f} with {n} stable terms."})
+            r=float(s.grouped_OOF_R2.iloc[0]);n=int(s.claimable_terms.iloc[0]);rows.append({"gap":"interpretable model discrepancy","stage":stage,"evidence":r,"status":"supported" if r>=0.70 and n>0 else "partial","claim":f"The sparse discrepancy surrogate achieved grouped OOF R²={r:.3f} with {n} stable terms."})
     if not repeated.empty:
         for stage,g in repeated.groupby("stage"):
             skill=float(g.RMSE_skill.median());rows.append({"gap":"split robustness","stage":stage,"evidence":skill,"status":"supported" if skill>0 else "weak","claim":f"Median skill across repeated site holdouts was {skill:.1%}."})
@@ -1697,7 +1696,7 @@ def zero_transition_statistics(data: pd.DataFrame) -> pd.DataFrame:
             )
     return pd.DataFrame(rows)
 
-def hurdle_metrics(oof: pd.DataFrame) -> pd.DataFrame:
+def occurrence_metrics(oof: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for stage, key in [("young", "u"), ("mature", "v")]:
         y = oof[f"positive_{key}1"].to_numpy(int)
@@ -1713,7 +1712,7 @@ def hurdle_metrics(oof: pd.DataFrame) -> pd.DataFrame:
         rows.append(row)
     return pd.DataFrame(rows)
 
-def hurdle_reliability(oof: pd.DataFrame) -> pd.DataFrame:
+def occurrence_reliability(oof: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for stage, key in [("young", "u"), ("mature", "v")]:
         frame = pd.DataFrame(
@@ -1738,14 +1737,14 @@ def hurdle_reliability(oof: pd.DataFrame) -> pd.DataFrame:
         rows.append(grouped)
     return pd.concat(rows, ignore_index=True)
 
-def climate_rate_response(mechanism: MechanisticModel, label: str) -> pd.DataFrame:
+def climate_rate_response(scaffold: DemographicScaffold, label: str) -> pd.DataFrame:
     grid = np.linspace(-2.5, 2.5, 101)
     rows = []
     for varied in [0, 1]:
         climate = np.zeros((len(grid), 2))
         climate[:, varied] = grid
-        q, maturation, mortality, rho, mu, a, b = MechanisticModel.rates(
-            mechanism.parameters, climate
+        q, maturation, mortality, rho, mu, a, b = DemographicScaffold.rates(
+            scaffold.parameters, climate
         )
         for index, value in enumerate(grid):
             rows.append(
@@ -1817,10 +1816,10 @@ def surrogate_matrix(frame:pd.DataFrame)->tuple[np.ndarray,list[str]]:
     names=["u0_log","v0_log","log_dt","event_year","decimalLatitude","decimalLongitude","young_area_precision","mature_area_precision","zero_u0","zero_v0",*RAW_CLIMATE_MODEL]
     x=frame[names].to_numpy(float);x[:,3]-=np.mean(x[:,3]);return x,names
 
-def fit_sparse_closure_surrogate(oof:pd.DataFrame,config:Configuration)->tuple[pd.DataFrame,pd.DataFrame]:
+def fit_sparse_discrepancy_surrogate(oof:pd.DataFrame,config:Configuration)->tuple[pd.DataFrame,pd.DataFrame]:
     x,names=surrogate_matrix(oof);groups=oof.siteID.astype(str).to_numpy();poly=PolynomialFeatures(2,include_bias=False).fit(x);splits=list(GroupKFold(min(3,np.unique(groups).size)).split(x,groups=groups));grid=[(a,l) for a in np.logspace(-4,-1,8) for l in (0.8,1.0)];terms=poly.get_feature_names_out(names);term_rows=[];audit=[]
     for stage,key in [("young","u"),("mature","v")]:
-        y=oof[f"closure_{key}_log"].to_numpy(float);scores=[]
+        y=oof[f"discrepancy_{key}_log"].to_numpy(float);scores=[]
         for alpha,l1 in grid:
             fold=[]
             for tr,va in splits:
@@ -1836,30 +1835,30 @@ def fit_sparse_closure_surrogate(oof:pd.DataFrame,config:Configuration)->tuple[p
         audit.append({"stage":stage,"grouped_OOF_R2":float(r2_score(y,oof_pred)),"grouped_OOF_RMSE":float(np.sqrt(mean_squared_error(y,oof_pred))),"alpha":alpha,"l1_ratio":l1,"nonzero_terms":int(np.sum(np.abs(coef)>1e-9)),"claimable_terms":int(np.sum((freq>=0.70)&(sign>=0.80)&(np.abs(coef)>1e-9))),"candidate_terms":len(coef)})
     return pd.concat(term_rows,ignore_index=True),pd.DataFrame(audit)
 
-def run_repeated_holdouts(data:pd.DataFrame,config:Configuration,gate:float,hurdle_weight:float)->pd.DataFrame:
+def run_repeated_holdouts(data:pd.DataFrame,config:Configuration,gate:float,occurrence_weight:float)->pd.DataFrame:
     if config.repeated_holdouts<=0:return pd.DataFrame()
     rows=[];groups=data.siteID.astype(str).to_numpy();splitter=GroupShuffleSplit(config.repeated_holdouts,test_size=config.repeated_test_fraction,random_state=config.seed+4000000)
     for repeat,(tr,te) in enumerate(splitter.split(np.arange(len(data)),groups=groups),1):
-        train=data.iloc[tr].reset_index(drop=True);test=data.iloc[te].reset_index(drop=True);cr,ca=split_core_calibration(train,config.calibration_fraction,config.seed+repeat*123);core=train.iloc[cr].reset_index(drop=True);cal=train.iloc[ca].reset_index(drop=True);spec=replace(primary_spec(config),gate=gate,hurdle_point_weight=hurdle_weight);model=HybridTransitionModel.fit(core,spec,config,config.seed+5000000+repeat*100000);state=fit_calibration_state(model,cal,config,config.seed+5000000+repeat*100000+20000);pred,_=predict_with_calibration(model,test,state,config,config.seed+5000000+repeat*100000+40000)
+        train=data.iloc[tr].reset_index(drop=True);test=data.iloc[te].reset_index(drop=True);cr,ca=split_core_calibration(train,config.calibration_fraction,config.seed+repeat*123);core=train.iloc[cr].reset_index(drop=True);cal=train.iloc[ca].reset_index(drop=True);spec=replace(primary_spec(config),gate=gate,occurrence_point_weight=occurrence_weight);model=TRACEModel.fit(core,spec,config,config.seed+5000000+repeat*100000);state=fit_calibration_state(model,cal,config,config.seed+5000000+repeat*100000+20000);pred,_=predict_with_calibration(model,test,state,config,config.seed+5000000+repeat*100000+40000)
         for stage,key in [("young","u"),("mature","v")]:
             y=test[f"{key}1_log"].to_numpy(float);p=pred[f"pred_{key}_log"].to_numpy(float);base=test[f"{key}0_log"].to_numpy(float);rmse=float(np.sqrt(mean_squared_error(y,p)));pr=float(np.sqrt(mean_squared_error(y,base)));covered=(y>=pred[f"lower_{key}_log"])&(y<=pred[f"upper_{key}_log"]);site=pd.DataFrame({"siteID":test.siteID.astype(str),"covered":covered}).groupby("siteID").covered.agg(["mean","all"])
             rows.append({"repeat":repeat,"stage":stage,"train_sites":train.siteID.nunique(),"test_sites":test.siteID.nunique(),"RMSE_log1p":rmse,"Persistence_RMSE_log1p":pr,"RMSE_skill":1-rmse/pr,"transition_coverage":float(np.mean(covered)),"mean_site_coverage":float(site["mean"].mean()),"simultaneous_site_coverage":float(site["all"].mean()),"mean_interval_width":float(np.mean(pred[f"upper_{key}_log"]-pred[f"lower_{key}_log"]))})
     return pd.DataFrame(rows)
 
-def fit_final_deployment(data:pd.DataFrame,config:Configuration)->tuple[HybridTransitionModel,CalibrationState,pd.DataFrame,pd.DataFrame,pd.DataFrame]:
+def fit_final_deployment(data:pd.DataFrame,config:Configuration)->tuple[TRACEModel,CalibrationState,pd.DataFrame,pd.DataFrame,pd.DataFrame]:
     cr,ca=split_core_calibration(data,config.calibration_fraction,config.seed+777);core=data.iloc[cr].reset_index(drop=True);cal=data.iloc[ca].reset_index(drop=True);spec=primary_spec(config);tuning=pd.DataFrame()
     if config.tune_gate:
-        gate,hw,tuning=tune_gate_nested(core,spec,config,config.seed+8000000);spec=replace(spec,gate=gate,hurdle_point_weight=hw)
-    model=HybridTransitionModel.fit(core,spec,config,config.seed+8100000);state=fit_calibration_state(model,cal,config,config.seed+8200000);prediction,_=predict_with_calibration(model,data.reset_index(drop=True),state,config,config.seed+8300000);identity=data[["transition_id","siteID","plotID","dt_years","u0_kha","v0_kha","u1_kha","v1_kha"]].reset_index(drop=True);final=pd.concat([identity,prediction],axis=1)
+        gate,hw,tuning=tune_gate_nested(core,spec,config,config.seed+8000000);spec=replace(spec,gate=gate,occurrence_point_weight=hw)
+    model=TRACEModel.fit(core,spec,config,config.seed+8100000);state=fit_calibration_state(model,cal,config,config.seed+8200000);prediction,_=predict_with_calibration(model,data.reset_index(drop=True),state,config,config.seed+8300000);identity=data[["transition_id","siteID","plotID","dt_years","u0_kha","v0_kha","u1_kha","v1_kha"]].reset_index(drop=True);final=pd.concat([identity,prediction],axis=1)
     for key in ("u","v"):
-        for prefix in ("pred","lower","upper","mechanism","magnitude"):
+        for prefix in ("pred","lower","upper","scaffold","magnitude"):
             col=f"{prefix}_{key}_log"
             if col in final:final[f"{prefix}_{key}_kha"]=np.expm1(final[col])
     split=pd.DataFrame({"partition":["core","calibration"],"rows":[len(core),len(cal)],"sites":[core.siteID.nunique(),cal.siteID.nunique()],"site_ids":[json.dumps(sorted(core.siteID.astype(str).unique().tolist())),json.dumps(sorted(cal.siteID.astype(str).unique().tolist()))]})
     return model,state,final,split,tuning
 
 def numerical_audit(
-    model: HybridTransitionModel,
+    model: TRACEModel,
     data: pd.DataFrame,
     cv_audit: pd.DataFrame,
     config: Configuration,
@@ -1890,9 +1889,9 @@ def numerical_audit(
             "value": float(cv_audit.minimum_simulated_log_state.min()),
         },
     ]
-    if model.mechanism is not None:
-        u_steps, v_steps = model.mechanism.predict(data, steps=config.integration_steps)
-        u_double, v_double = model.mechanism.predict(data, steps=2 * config.integration_steps)
+    if model.scaffold is not None:
+        u_steps, v_steps = model.scaffold.predict(data, steps=config.integration_steps)
+        u_double, v_double = model.scaffold.predict(data, steps=2 * config.integration_steps)
         rows.extend(
             [
                 {
@@ -1916,29 +1915,29 @@ def numerical_audit(
     return pd.DataFrame(rows)
 
 def make_figures(oof:pd.DataFrame,metrics:pd.DataFrame,regimes:pd.DataFrame,ood:pd.DataFrame,reliability:pd.DataFrame,calibration:pd.DataFrame,contribution:pd.DataFrame,out:Path,config:Configuration)->pd.DataFrame:
-    d=out/"figures";d.mkdir(parents=True,exist_ok=True);files=[];pu,pv=prediction_columns_for_model("PACT-Transition")
+    d=out/"figures";d.mkdir(parents=True,exist_ok=True);files=[];pu,pv=prediction_columns_for_model("TRACE")
     fig,axes=plt.subplots(1,2,figsize=(11,5))
     for ax,stage,key,col in zip(axes,["Young","Mature"],["u","v"],[pu,pv]):
-        y=oof[f"{key}1_log"].to_numpy(float);p=oof[col].to_numpy(float);limit=max(y.max(),p.max())*1.02;im=ax.hexbin(y,p,gridsize=38,mincnt=1,bins="log");ax.plot([0,limit],[0,limit],"--",linewidth=1);ax.set(xlim=(0,limit),ylim=(0,limit),xlabel="Observed log1p density",ylabel="Predicted log1p density",title=stage);fig.colorbar(im,ax=ax,label="log count")
-    fig.tight_layout();name="figure_1_oof_prediction.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Site-blocked out-of-fold prediction"))
+        y=oof[f"{key}1_log"].to_numpy(float);p=oof[col].to_numpy(float);limit=max(y.max(),p.max())*1.02;im=ax.hexbin(y,p,gridsize=38,mincnt=1,bins="log");ax.plot([0,limit],[0,limit],"--",linewidth=1);ax.set(xlim=(0,limit),ylim=(0,limit),xlabel="Observed log(1 + density)",ylabel="Predicted log(1 + density)",title=stage);fig.colorbar(im,ax=ax,label="log count")
+    fig.tight_layout();name="figure_1_out_of_site_predictions.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Out-of-site predictions"))
     rmse=metrics[metrics.metric=="RMSE_log1p"].copy();order=rmse.groupby("model").estimate.mean().sort_values().index;fig,ax=plt.subplots(figsize=(9,max(5,0.34*len(order))));pos=np.arange(len(order));w=0.36
     for off,stage in [(-w/2,"young"),(w/2,"mature")]:cur=rmse[rmse.stage==stage].set_index("model").reindex(order);ax.barh(pos+off,cur.estimate,height=w,label=stage.capitalize())
-    ax.set_yticks(pos,order);ax.invert_yaxis();ax.set(xlabel="RMSE on log1p scale",title="Model and refitted ablation comparison");ax.legend(frameon=False);fig.tight_layout();name="figure_2_model_comparison.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Model and independently refitted ablations"))
+    ax.set_yticks(pos,order);ax.invert_yaxis();ax.set(xlabel="RMSE on log(1 + density) scale",title="Model and independently refitted component comparison");ax.legend(frameon=False);fig.tight_layout();name="figure_5_model_comparison.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Site-blocked RMSE for TRACE, direct empirical benchmarks, and independently refitted component comparisons"))
     fig,axes=plt.subplots(1,2,figsize=(11,5))
-    for ax,stage,key in zip(axes,["Young","Mature"],["u","v"]):ax.boxplot([oof[f"gated_mechanism_{key}_log"],oof[f"closure_{key}_log"]],tick_labels=["Gated ODE","Learned closure"],showfliers=False);ax.axhline(0,linestyle="--",linewidth=1);ax.set(ylabel="Contribution on log1p scale",title=stage)
-    fig.tight_layout();name="figure_3_component_contribution.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Deployed ODE and closure contributions"))
+    for ax,stage,key in zip(axes,["Young","Mature"],["u","v"]):ax.boxplot([oof[f"gated_scaffold_{key}_log"],oof[f"discrepancy_{key}_log"]],tick_labels=["Gated demographic displacement","Learned discrepancy"],showfliers=False);ax.axhline(0,linestyle="--",linewidth=1);ax.set(ylabel="Contribution on log(1 + density) scale",title=stage)
+    fig.tight_layout();name="figure_6_prediction_decomposition.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Decomposition of the out-of-site prediction into gated demographic displacement and learned discrepancy"))
     if not regimes.empty:
-        pivot=regimes.pivot(index="regime",columns="stage",values="skill_vs_persistence").fillna(0);fig,ax=plt.subplots(figsize=(9,5));pivot.mul(100).plot.bar(ax=ax);ax.axhline(0,linestyle="--",linewidth=1);ax.set(ylabel="RMSE skill versus persistence (%)",xlabel="Transition regime",title="Where predictive skill is gained");ax.legend(frameon=False);fig.tight_layout();name="figure_4_transition_regimes.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Skill by zero-positive transition regime"))
+        pivot=regimes.pivot(index="regime",columns="stage",values="skill_vs_persistence").fillna(0);fig,ax=plt.subplots(figsize=(9,5));pivot.mul(100).plot.bar(ax=ax);ax.axhline(0,linestyle="--",linewidth=1);ax.set(ylabel="RMSE skill relative to persistence (%)",xlabel="Transition regime",title="Establishment carries the largest transferable gain");ax.legend(frameon=False);fig.tight_layout();name="figure_3_transition_regimes.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"RMSE skill relative to persistence by transition regime"))
     if not ood.empty:
         fig,ax=plt.subplots(figsize=(8,5))
         for stage,g in ood.groupby("stage"):q=g.sort_values("median");ax.plot(q["median"],q.RMSE_model,marker="o",label=stage.capitalize())
-        ax.set(xlabel="Nearest-training feature distance",ylabel="RMSE on log1p scale",title="Error under feature-space extrapolation");ax.legend(frameon=False);fig.tight_layout();name="figure_5_ood_error.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Prediction error under extrapolation"))
+        ax.set(xlabel="Median nearest-training feature distance",ylabel="RMSE on log(1 + density) scale",title="Prediction under increasing feature-space distance from the training domain");ax.legend(frameon=False);fig.tight_layout();name="figure_2_feature_space_distance.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Prediction under increasing feature-space distance from the training domain"))
     if not reliability.empty:
         fig,axes=plt.subplots(1,2,figsize=(10,4.6))
-        for ax,stage in zip(axes,["young","mature"]):g=reliability[reliability.stage==stage];ax.plot([0,1],[0,1],"--",linewidth=1);ax.plot(g.mean_predicted_probability,g.observed_positive_rate,marker="o");ax.set(xlim=(0,1),ylim=(0,1),xlabel="Predicted positive probability",ylabel="Observed frequency",title=stage.capitalize())
-        fig.tight_layout();name="figure_6_hurdle_calibration.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Cross-fitted hurdle probability calibration"))
+        for ax,stage in zip(axes,["young","mature"]):g=reliability[reliability.stage==stage];ax.plot([0,1],[0,1],"--",linewidth=1);ax.plot(g.mean_predicted_probability,g.observed_positive_rate,marker="o");ax.set(xlim=(0,1),ylim=(0,1),xlabel="Predicted positive probability",ylabel="Observed positive frequency",title=stage.capitalize())
+        fig.tight_layout();name="figure_4_occurrence_calibration.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Calibration of next-census positive-state probabilities"))
     if not calibration.empty:
-        q=calibration[calibration.interval=="site_conformal"];fig,ax=plt.subplots(figsize=(8,5));x=np.arange(len(q));ax.bar(x-0.22,q.transition_coverage,width=0.22,label="Transition");ax.bar(x,q.mean_site_coverage,width=0.22,label="Mean site");ax.bar(x+0.22,q.simultaneous_site_coverage,width=0.22,label="All transitions at site");ax.axhline(config.interval,linestyle="--",linewidth=1,label="Nominal");ax.set_xticks(x,q.stage.str.capitalize());ax.set_ylim(0,1);ax.set(ylabel="Coverage",title="Site-aware interval calibration");ax.legend(frameon=False);fig.tight_layout();name="figure_7_interval_calibration.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Transition and site-level interval coverage"))
+        q=calibration[calibration.interval=="site_conformal"];fig,ax=plt.subplots(figsize=(8,5));x=np.arange(len(q));ax.bar(x-0.22,q.transition_coverage,width=0.22,label="Transition");ax.bar(x,q.mean_site_coverage,width=0.22,label="Mean site");ax.bar(x+0.22,q.simultaneous_site_coverage,width=0.22,label="All transitions at site");ax.axhline(config.interval,linestyle="--",linewidth=1,label="Nominal");ax.set_xticks(x,q.stage.str.capitalize());ax.set_ylim(0,1);ax.set(ylabel="Coverage",title="Transition-level and site-level coverage after site-quantile adjustment");ax.legend(frameon=False);fig.tight_layout();name="figure_7_interval_calibration.png";fig.savefig(d/name,dpi=config.dpi);plt.close(fig);files.append((name,"Transition-level and site-level interval coverage"))
     return pd.DataFrame([{"figure":n,"title":t,"relative_path":str((d/n).relative_to(out)),"bytes":(d/n).stat().st_size} for n,t in files])
 
 def safe_sheet_name(name: str, used: set[str]) -> str:
@@ -1953,7 +1952,7 @@ def safe_sheet_name(name: str, used: set[str]) -> str:
     return candidate
 
 def save_excel_workbook(out: Path, tables: dict[str, pd.DataFrame]) -> Path:
-    workbook_path = out / "PACT_Transition_Results.xlsx"
+    workbook_path = out / "TRACE_Results.xlsx"
     used: set[str] = set()
     index_rows = []
     with pd.ExcelWriter(workbook_path, engine="xlsxwriter") as writer:
@@ -2009,13 +2008,12 @@ def save_tables(out:Path,tables:dict[str,pd.DataFrame])->Path:
 def build_summary(data: pd.DataFrame, metrics: pd.DataFrame, runtime: float) -> pd.DataFrame:
     rows = [
         {"metric": "model", "value": MODEL_NAME},
-        {"metric": "model_version", "value": MODEL_VERSION},
         {"metric": "transitions", "value": len(data)},
         {"metric": "plots", "value": data.plotID.nunique()},
         {"metric": "sites", "value": data.siteID.nunique()},
         {"metric": "runtime_seconds", "value": runtime},
     ]
-    primary = metrics[metrics.model == "PACT-Transition"]
+    primary = metrics[metrics.model == "TRACE"]
     for _, row in primary.iterrows():
         rows.append(
             {
@@ -2035,42 +2033,42 @@ def model_card(config: Configuration) -> pd.DataFrame:
     statements = [
         (
             "Scope",
-            "Predicts young and mature forest density at the next observed census endpoint for sites excluded from model fitting.",
+            "Predicts young- and mature-tree density at the next observed census for sites excluded from fitting and calibration.",
         ),
         (
-            "Deterministic process",
-            "A nonnegative two-stage ODE skeleton encodes recruitment, maturation, loss, and density regulation.",
+            "Demographic scaffold",
+            "A non-negative two-stage demographic scaffold represents input into the young stage, transfer to the mature stage, stage-specific loss, and density regulation.",
         ),
         (
-            "Data-driven discrepancy",
-            "A regularized multiscale Gaussian kernel learns transition structure not represented by the ODE.",
+            "Learned discrepancy",
+            "A ridge-regularized multi-scale Gaussian kernel learns transition information not represented by the demographic scaffold.",
         ),
         (
-            "Zero process",
-            "Cross-fitted Extra Trees classifiers with held-site probability calibration model zero versus positive endpoints; their contribution to the point estimate is selected inside grouped validation.",
+            "Occurrence layer",
+            "Site-grouped cross-fitted Extra Trees estimate next-census positive-state probabilities, followed by isotonic or logistic calibration.",
         ),
         (
-            "Uncertainty",
-            "Monte Carlo endpoint draws combine interval-length process variation, count-dependent observation error, and cross-stage correlation.",
+            "Predictive intervals",
+            "Monte Carlo endpoint draws combine empirical transition variation, count-related observation uncertainty, and dependence between stages.",
         ),
         (
-            "Conformal validity target",
+            "Site-quantile adjustment",
             f"Calibration uses {config.conformal_mode} scores from sites excluded from predictor fitting; the same core-fitted predictor is used on calibration and test sites.",
         ),
         (
             "Not claimed",
-            "The software is not an Ito or Stratonovich path solver, does not identify causal climate effects, and is not validated for recursive long-horizon simulation.",
+            "The software does not identify causal climate effects and is not validated for recursive long-horizon simulation.",
         ),
         (
             "Deployment caveat",
-            "Climate covariates summarized over the census interval represent conditional hindcast information unless replaced by an operational climate forecast or scenario.",
+            "Climate covariates summarized over the census interval represent conditional transition information unless replaced by operational climate forecasts or scenarios.",
         ),
     ]
     return pd.DataFrame(statements, columns=["item", "statement"])
 
 def parse_arguments()->argparse.Namespace:
-    p=argparse.ArgumentParser(description="PACT-Transition 3.0")
-    p.add_argument("--data",default=None);p.add_argument("--out",default="results_pact_transition_v3");p.add_argument("--profile",choices=["smoke","standard","full"],default="full");p.add_argument("--folds",type=int,default=None);p.add_argument("--bootstrap",type=int,default=None);p.add_argument("--paired-bootstrap",type=int,default=None);p.add_argument("--mc-draws",type=int,default=None);p.add_argument("--steps",type=int,default=None);p.add_argument("--seed",type=int,default=2026);p.add_argument("--dpi",type=int,default=None);p.add_argument("--calibration-fraction",type=float,default=None);p.add_argument("--interval",type=float,default=None);p.add_argument("--conformal-mode",choices=["site_max","site_quantile","transition"],default=None);p.add_argument("--repeated-holdouts",type=int,default=None);p.add_argument("--no-tuning",action="store_true")
+    p=argparse.ArgumentParser(description="TRACE: Transition-Regime Attribution and Calibrated Extrapolation")
+    p.add_argument("--data",default=None);p.add_argument("--out",default="results_trace");p.add_argument("--profile",choices=["smoke","standard","full"],default="full");p.add_argument("--folds",type=int,default=None);p.add_argument("--bootstrap",type=int,default=None);p.add_argument("--paired-bootstrap",type=int,default=None);p.add_argument("--mc-draws",type=int,default=None);p.add_argument("--steps",type=int,default=None);p.add_argument("--seed",type=int,default=2026);p.add_argument("--dpi",type=int,default=None);p.add_argument("--calibration-fraction",type=float,default=None);p.add_argument("--interval",type=float,default=None);p.add_argument("--conformal-mode",choices=["site_max","site_quantile","transition"],default=None);p.add_argument("--repeated-holdouts",type=int,default=None);p.add_argument("--no-tuning",action="store_true")
     args,_=p.parse_known_args();return args
 
 def resolve_data_path(value: str | None) -> Path:
@@ -2104,12 +2102,12 @@ def main()->None:
     config=Configuration.for_profile(args.profile,outer_folds=args.folds,cluster_bootstrap=args.bootstrap,paired_bootstrap=args.paired_bootstrap,mc_draws=args.mc_draws,integration_steps=args.steps,seed=args.seed,dpi=args.dpi,calibration_fraction=args.calibration_fraction,interval=args.interval,conformal_mode=args.conformal_mode,repeated_holdouts=args.repeated_holdouts)
     if args.no_tuning:config.tune_gate=False
     data=prepare_data(data_path);print(f"{len(data)} transitions | {data.plotID.nunique()} plots | {data.siteID.nunique()} sites | profile={config.profile}")
-    evaluation=run_outer_cv(data,config);oof=evaluation["OOF_Predictions"];metrics=model_metrics_table(oof,config);paired=paired_model_comparisons(oof,config);folds=fold_metrics(oof,config);sites=grouped_skill(oof,"siteID",config);horizon=horizon_skill(oof,config);ood=ood_analysis(oof,config);hurdle=hurdle_metrics(oof);reliability=hurdle_reliability(oof);calibration=interval_calibration_diagnostics(oof,config);regimes=transition_regime_analysis(oof,config);contribution=contribution_evidence(oof,metrics,paired);climate=summarize_climate_rates(evaluation["Fold_Climate_Rates"]);stability=parameter_stability(evaluation["Fold_Parameters"]);symbolic_terms,symbolic_audit=fit_sparse_closure_surrogate(oof,config)
-    selected_gate=float(evaluation["CV_Audit"].selected_gate.median());selected_weight=float(evaluation["CV_Audit"].selected_hurdle_point_weight.median());repeated=run_repeated_holdouts(data,config,selected_gate,selected_weight);gaps=research_gap_evidence(metrics,contribution,regimes,calibration,repeated,symbolic_audit);claims=paper_claims(gaps)
-    final_model,final_calibration,final_prediction,final_split,final_tuning=fit_final_deployment(data,config);numerical=numerical_audit(final_model,data,evaluation["CV_Audit"],config);runtime=time.time()-start;summary=build_summary(data,metrics,runtime);descriptive=descriptive_statistics(data[[c for c in REQUIRED if c in data.columns]+["u0_log","v0_log","u1_log","v1_log","delta_u_log","delta_v_log","log_dt"]]);final_parameters=final_model.mechanism.parameter_table("final_deployment") if final_model.mechanism is not None else pd.DataFrame();final_rates=climate_rate_response(final_model.mechanism,"final_deployment") if final_model.mechanism is not None else pd.DataFrame();run_audit=pd.DataFrame({"item":["model","version","data","sha256","python","numpy","pandas","scipy","scikit_learn","platform","configuration","final_spec","teacher_hurdle_audit","calibration"],"value":[MODEL_NAME,MODEL_VERSION,str(data_path),sha256(data_path),sys.version,np.__version__,pd.__version__,scipy.__version__,sklearn.__version__,platform.platform(),json.dumps(jsonable(asdict(config)),ensure_ascii=False),json.dumps(jsonable(asdict(final_model.spec)),ensure_ascii=False),json.dumps(jsonable(final_model.teacher_audit),ensure_ascii=False),json.dumps({"mode":final_calibration.mode,"q_young":final_calibration.conformal_q_young,"q_mature":final_calibration.conformal_q_mature,"sites":final_calibration.calibration_sites},ensure_ascii=False)]})
-    tables={"Summary":summary,"Paper_Claims":claims,"Research_Gap_Evidence":gaps,"Model_Metrics":metrics,"Paired_Model_Comparisons":paired,"Component_Evidence":contribution,"Transition_Regimes":regimes,"Repeated_Holdouts":repeated,"Fold_Metrics":folds,"Site_Skill":sites,"Horizon_Skill":horizon,"OOD_Analysis":ood,"Interval_Calibration":calibration,"Hurdle_Metrics":hurdle,"Hurdle_Reliability":reliability,"Gate_Hurdle_Tuning":evaluation["Gate_Tuning"],"CV_Audit":evaluation["CV_Audit"],"Parameter_Stability":stability,"Climate_Rate_Stability":climate,"Symbolic_Closure_Terms":symbolic_terms,"Symbolic_Closure_Audit":symbolic_audit,"Descriptive_Statistics":descriptive,"Final_Parameters":final_parameters,"Final_Climate_Rates":final_rates,"Final_Split":final_split,"Final_Tuning":final_tuning,"Final_Calibration_Scores":final_calibration.score_table,"OOF_Predictions":oof,"Final_Predictions":final_prediction,"Numerical_Audit":numerical,"Model_Card":model_card(config),"Run_Audit":run_audit}
-    figures=make_figures(oof,metrics,regimes,ood,reliability,calibration,contribution,out,config);tables["Figures_Manifest"]=figures;workbook=save_tables(out,tables);joblib.dump({"model_name":MODEL_NAME,"version":MODEL_VERSION,"configuration":asdict(config),"model":final_model,"calibration":final_calibration,"data_sha256":sha256(data_path)},out/"pact_transition_model.joblib",compress=3)
-    (out/"paper_results.txt").write_text("\n".join(claims.claim.astype(str)),encoding="utf-8");manifest={"model":MODEL_NAME,"version":MODEL_VERSION,"data":str(data_path),"data_sha256":sha256(data_path),"configuration":jsonable(asdict(config)),"selected_outer_gate_median":selected_gate,"selected_outer_hurdle_weight_median":selected_weight,"runtime_seconds":runtime,"guarantees":{"site_blocked_outer_test":True,"calibration_sites_excluded_from_predictor_fit":True,"same_predictor_for_calibration_and_test":True,"refitted_ablations":True,"cross_fitted_probability_calibration":True,"site_level_interval_reporting":True,"recursive_long_horizon_claimed":False,"causal_climate_claimed":False},"final_calibration":{"mode":final_calibration.mode,"q_young":final_calibration.conformal_q_young,"q_mature":final_calibration.conformal_q_mature},"kernel_audit":final_model.closure.mathematical_audit()};(out/"run_manifest.json").write_text(json.dumps(manifest,indent=2,ensure_ascii=False),encoding="utf-8")
+    evaluation=run_outer_cv(data,config);oof=evaluation["OOF_Predictions"];metrics=model_metrics_table(oof,config);paired=paired_model_comparisons(oof,config);folds=fold_metrics(oof,config);sites=grouped_skill(oof,"siteID",config);horizon=horizon_skill(oof,config);ood=ood_analysis(oof,config);occurrence=occurrence_metrics(oof);reliability=occurrence_reliability(oof);calibration=interval_calibration_diagnostics(oof,config);regimes=transition_regime_analysis(oof,config);contribution=contribution_evidence(oof,metrics,paired);climate=summarize_climate_rates(evaluation["Fold_Climate_Rates"]);stability=parameter_stability(evaluation["Fold_Parameters"]);symbolic_terms,symbolic_audit=fit_sparse_discrepancy_surrogate(oof,config)
+    selected_gate=float(evaluation["CV_Audit"].selected_gate.median());selected_weight=float(evaluation["CV_Audit"].selected_occurrence_point_weight.median());repeated=run_repeated_holdouts(data,config,selected_gate,selected_weight);gaps=research_gap_evidence(metrics,contribution,regimes,calibration,repeated,symbolic_audit);claims=paper_claims(gaps)
+    final_model,final_calibration,final_prediction,final_split,final_tuning=fit_final_deployment(data,config);numerical=numerical_audit(final_model,data,evaluation["CV_Audit"],config);runtime=time.time()-start;summary=build_summary(data,metrics,runtime);descriptive=descriptive_statistics(data[[c for c in REQUIRED if c in data.columns]+["u0_log","v0_log","u1_log","v1_log","delta_u_log","delta_v_log","log_dt"]]);final_parameters=final_model.scaffold.parameter_table("final_deployment") if final_model.scaffold is not None else pd.DataFrame();final_rates=climate_rate_response(final_model.scaffold,"final_deployment") if final_model.scaffold is not None else pd.DataFrame();run_audit=pd.DataFrame({"item":["model","data","sha256","python","numpy","pandas","scipy","scikit_learn","platform","configuration","final_spec","teacher_occurrence_audit","calibration"],"value":[MODEL_NAME,str(data_path),sha256(data_path),sys.version,np.__version__,pd.__version__,scipy.__version__,sklearn.__version__,platform.platform(),json.dumps(jsonable(asdict(config)),ensure_ascii=False),json.dumps(jsonable(asdict(final_model.spec)),ensure_ascii=False),json.dumps(jsonable(final_model.teacher_audit),ensure_ascii=False),json.dumps({"mode":final_calibration.mode,"q_young":final_calibration.conformal_q_young,"q_mature":final_calibration.conformal_q_mature,"sites":final_calibration.calibration_sites},ensure_ascii=False)]})
+    tables={"Summary":summary,"Paper_Claims":claims,"Research_Gap_Evidence":gaps,"Model_Metrics":metrics,"Paired_Model_Comparisons":paired,"Component_Evidence":contribution,"Transition_Regimes":regimes,"Repeated_Holdouts":repeated,"Fold_Metrics":folds,"Site_Skill":sites,"Horizon_Skill":horizon,"OOD_Analysis":ood,"Interval_Calibration":calibration,"Occurrence_Metrics":occurrence,"Occurrence_Reliability":reliability,"Gate_Occurrence_Tuning":evaluation["Gate_Occurrence_Tuning"],"CV_Audit":evaluation["CV_Audit"],"Parameter_Stability":stability,"Climate_Rate_Stability":climate,"Discrepancy_Surrogate_Terms":symbolic_terms,"Discrepancy_Surrogate_Audit":symbolic_audit,"Descriptive_Statistics":descriptive,"Final_Parameters":final_parameters,"Final_Climate_Rates":final_rates,"Final_Split":final_split,"Final_Tuning":final_tuning,"Final_Calibration_Scores":final_calibration.score_table,"OOF_Predictions":oof,"Final_Predictions":final_prediction,"Numerical_Audit":numerical,"Model_Card":model_card(config),"Run_Audit":run_audit}
+    figures=make_figures(oof,metrics,regimes,ood,reliability,calibration,contribution,out,config);tables["Figures_Manifest"]=figures;workbook=save_tables(out,tables);joblib.dump({"model_name":MODEL_NAME,"configuration":asdict(config),"model":final_model,"calibration":final_calibration,"data_sha256":sha256(data_path)},out/"trace_model.joblib",compress=3)
+    (out/"paper_results.txt").write_text("\n".join(claims.claim.astype(str)),encoding="utf-8");manifest={"model":MODEL_NAME,"data":str(data_path),"data_sha256":sha256(data_path),"configuration":jsonable(asdict(config)),"selected_outer_gate_median":selected_gate,"selected_outer_occurrence_point_weight_median":selected_weight,"runtime_seconds":runtime,"guarantees":{"site_blocked_outer_test":True,"calibration_sites_excluded_from_predictor_fit":True,"same_predictor_for_calibration_and_test":True,"refitted_ablations":True,"cross_fitted_probability_calibration":True,"site_level_interval_reporting":True,"recursive_long_horizon_claimed":False,"causal_climate_claimed":False},"final_calibration":{"mode":final_calibration.mode,"q_young":final_calibration.conformal_q_young,"q_mature":final_calibration.conformal_q_mature},"discrepancy_audit":final_model.discrepancy.mathematical_audit()};(out/"run_manifest.json").write_text(json.dumps(manifest,indent=2,ensure_ascii=False),encoding="utf-8")
     print(summary.to_string(index=False));print(f"Workbook: {workbook}");print(f"Completed in {runtime:.1f}s: {out}")
 
 if __name__=="__main__":main()
