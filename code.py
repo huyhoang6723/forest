@@ -50,24 +50,8 @@ F_MIN, F_MAX = 1e-4, 1.5
 H_MIN, H_MAX = 1e-4, 1.5
 RAW_CLIMATE_SOURCE = ["clim_tmean_c", "clim_vpd_mean_kpa", "clim_prcp_annualized_mm", "clim_deficit_annualized_mm"]
 RAW_CLIMATE_MODEL = ["clim_tmean_c", "clim_vpd_mean_kpa", "log_prcp", "log_deficit"]
-BASE_FEATURE_ORDER = ["u0_log", "v0_log", "dt_years", "log_dt", "event_year", "decimalLatitude", "decimalLongitude", "young_baseline_area_precision", "mature_baseline_area_precision", "young_baseline_area_missing", "mature_baseline_area_missing", "zero_u0", "zero_v0"]
-DEFAULT_FEATURE_WEIGHT_MAP = {
-    "u0_log": 2.5,
-    "v0_log": 1.2,
-    "dt_years": 0.7,
-    "log_dt": 0.7,
-    "event_year": 0.7,
-    "decimalLatitude": 0.7,
-    "decimalLongitude": 0.7,
-    "young_baseline_area_precision": 2.2,
-    "mature_baseline_area_precision": 0.8,
-    "young_baseline_area_missing": 1.0,
-    "mature_baseline_area_missing": 1.0,
-    "zero_u0": 2.5,
-    "zero_v0": 1.2,
-    "climate_PC1": 0.8,
-    "climate_PC2": 0.8,
-}
+BASE_FEATURE_ORDER = ["u0_log", "v0_log", "dt_years", "log_dt", "target_year", "decimalLatitude", "decimalLongitude", "young_baseline_area_precision", "mature_baseline_area_precision", "young_baseline_area_missing", "mature_baseline_area_missing", "zero_u0", "zero_v0"]
+DEFAULT_FEATURE_WEIGHT_MAP = {name: 1.0 for name in [*BASE_FEATURE_ORDER, "climate_PC1", "climate_PC2"]}
 REQUIRED = [
     "transition_id",
     "siteID",
@@ -99,13 +83,18 @@ class ModelSpec:
     use_climate: bool = True
     use_coordinates: bool = True
     use_precision_features: bool = True
-    use_precision_weights: bool = True
+    use_precision_weights: bool = False
+    use_variance_weights: bool = True
     use_occurrence: bool = True
 
 @dataclass(frozen=True)
 class HyperParameters:
     gate: float = 0.25
     ridge_scale: float = 1.0
+    distillation_weight: float = 0.75
+    occurrence_gate: float = 1.0
+    gamma_scale: float = 1.0
+    kernel_alpha: float = 0.50
 
 @dataclass
 class Configuration:
@@ -145,14 +134,13 @@ class Configuration:
     teacher_trees: int = 240
     teacher_max_depth: int = 9
     teacher_min_leaf: int = 6
-    distillation_data_weight: float = 0.35
     occurrence_folds: int = 4
     occurrence_trees: int = 360
     occurrence_min_leaf: int = 8
     probability_clip: float = 0.002
     rbf_centers: int = 128
     kernel_gammas: tuple[float, ...] = (0.01, 0.08)
-    kernel_weights: tuple[float, ...] = (0.65, 0.35)
+    kernel_weights: tuple[float, ...] = (0.50, 0.50)
     young_kernel_ridge: float = 0.15
     mature_kernel_ridge: float = 0.80
     kernel_jitter: float = 1e-8
@@ -161,7 +149,17 @@ class Configuration:
     tune_benchmarks: bool = True
     gate_grid: tuple[float, ...] = (0.0, 0.10, 0.25, 0.50, 0.75, 1.0)
     ridge_scale_grid: tuple[float, ...] = (0.5, 1.0, 2.0)
+    distillation_weight_grid: tuple[float, ...] = (0.25, 0.50, 0.75, 1.0)
+    occurrence_gate_grid: tuple[float, ...] = (0.0, 0.50, 1.0)
+    gamma_scale_grid: tuple[float, ...] = (0.5, 1.0, 2.0)
+    kernel_alpha_grid: tuple[float, ...] = (0.25, 0.50, 0.75)
     tuning_zero_weight: float = 0.20
+    variance_weight_folds: int = 3
+    variance_count_offset: float = 0.50
+    variance_weight_lower_quantile: float = 0.02
+    variance_weight_upper_quantile: float = 0.98
+    support_change_tolerance: float = 0.20
+    tuning_refinement: bool = True
     repeated_holdouts: int = 30
     repeated_test_fraction: float = 0.25
     surrogate_splits: int = 20
@@ -194,34 +192,43 @@ class Configuration:
             c.regime_bootstrap = 20
             c.signflip_permutations = 100
             c.residual_permutations = 100
-            c.mc_draws = 32
+            c.mc_draws = 16
             c.log_diffusion_draws = 32
             c.positive_diffusion_draws = 32
             c.integration_steps = 10
             c.log_diffusion_steps = 12
             c.positive_diffusion_steps = 12
             c.scaffold_multistart = 1
-            c.scaffold_max_nfev = 30
+            c.scaffold_max_nfev = 10
             c.scaffold_bootstrap_max_nfev = 50
-            c.ode_bootstrap = 2
+            c.ode_bootstrap = 0
             c.ode_sensitivity_rows = 120
             c.ode_profile_points = 3
-            c.ode_profile_max_nfev = 20
+            c.ode_profile_max_nfev = 5
             c.ode_profile_rows = 100
-            c.derivative_bootstrap = 1
+            c.derivative_bootstrap = 0
             c.derivative_reference_rows = 64
             c.teacher_folds = 2
-            c.teacher_trees = 24
+            c.teacher_trees = 8
             c.occurrence_folds = 2
-            c.occurrence_trees = 36
-            c.rbf_centers = 32
-            c.gate_grid = (0.0, 0.5)
+            c.occurrence_trees = 12
+            c.rbf_centers = 12
+            c.gate_grid = (0.0, 0.5, 1.0)
             c.ridge_scale_grid = (1.0,)
-            c.repeated_holdouts = 1
-            c.spatiotemporal_repeats = 1
+            c.distillation_weight_grid = (0.5, 1.0)
+            c.occurrence_gate_grid = (0.0, 1.0)
+            c.gamma_scale_grid = (1.0,)
+            c.kernel_alpha_grid = (0.5,)
+            c.variance_weight_folds = 2
+            c.tuning_refinement = False
+            c.repeated_holdouts = 0
+            c.spatiotemporal_repeats = 0
             c.temporal_cut_quantiles = (0.70,)
-            c.surrogate_splits = 2
+            c.surrogate_splits = 1
             c.tune_benchmarks = False
+            c.log_diffusion_enabled = False
+            c.positive_diffusion_enabled = False
+            c.temporal_validation_enabled = False
             c.dpi = 100
         elif profile == "standard":
             c.cluster_bootstrap = 400
@@ -249,6 +256,10 @@ class Configuration:
             c.rbf_centers = 96
             c.gate_grid = (0.0, 0.25, 0.5, 1.0)
             c.ridge_scale_grid = (0.5, 1.0, 2.0)
+            c.distillation_weight_grid = (0.5, 0.75, 1.0)
+            c.occurrence_gate_grid = (0.0, 0.5, 1.0)
+            c.gamma_scale_grid = (0.5, 1.0, 2.0)
+            c.kernel_alpha_grid = (0.25, 0.5, 0.75)
             c.repeated_holdouts = 10
             c.spatiotemporal_repeats = 3
             c.surrogate_splits = 10
@@ -376,7 +387,9 @@ def data_role_dictionary(data: pd.DataFrame) -> pd.DataFrame:
     post = {"young_log_growth_rate", "mature_log_growth_rate", "death_events", "maturation_events", "death_fraction_interval", "maturation_fraction_interval", "death_hazard_annual", "maturation_hazard_annual"}
     realized = set(column for column in data.columns if column.startswith("clim_")) | {"climate_days", "climate_expected_days", "climate_coverage", "log_prcp", "log_deficit"}
     globally_standardized = {column for column in data.columns if column.endswith("_z")}
-    derived = {"u0_log", "v0_log", "u1_log", "v1_log", "delta_u_log", "delta_v_log", "log_dt", "zero_u0", "zero_v0", "positive_u1", "positive_v1", "row_id", "sequence_index_plot", "n_transitions_plot", "t0_date", "t1_date", "t0_year", "t1_year", "midpoint_year"}
+    baseline_derived = {"u0_log", "v0_log", "zero_u0", "zero_v0"}
+    derived = {"u1_log", "v1_log", "delta_u_log", "delta_v_log", "positive_u1", "positive_v1", "row_id", "sequence_index_plot", "n_transitions_plot", "t0_date", "t1_date", "t0_year", "t1_year", "midpoint_year"}
+    scheduled = {"target_year", "dt_years", "log_dt"}
     rows = []
     for column in data.columns:
         if column in identifiers:
@@ -391,6 +404,14 @@ def data_role_dictionary(data: pd.DataFrame) -> pd.DataFrame:
             role = "endpoint_observation"
             availability = "t1"
             model_allowed = False
+        elif column in scheduled:
+            role = "scheduled_horizon"
+            availability = "t0_known_horizon"
+            model_allowed = True
+        elif column in baseline_derived:
+            role = "baseline_derived"
+            availability = "t0_derived"
+            model_allowed = True
         elif column in post:
             role = "post_interval_audit"
             availability = "post_t1"
@@ -417,6 +438,38 @@ def data_role_dictionary(data: pd.DataFrame) -> pd.DataFrame:
             model_allowed = False
         rows.append({"column": column, "role": role, "availability": availability, "model_allowed": bool(model_allowed), "dtype": str(data[column].dtype)})
     return pd.DataFrame(rows)
+
+
+def predictor_availability_audit(data: pd.DataFrame, spec: ModelSpec, feature_names: Sequence[str]) -> pd.DataFrame:
+    dictionary = data_role_dictionary(data).set_index("column")
+    rows = []
+    permitted_availability = {"t0", "t0_derived", "t0_known_horizon", "t0_to_t1"}
+    for feature in feature_names:
+        if feature in {"climate_PC1", "climate_PC2"}:
+            role = "realized_interval_covariate"
+            availability = "t0_to_t1"
+            available_for_target_estimation = bool(spec.use_climate)
+            allowed_in_spec = bool(spec.use_climate)
+        elif feature in dictionary.index:
+            role = str(dictionary.at[feature, "role"])
+            availability = str(dictionary.at[feature, "availability"])
+            available_for_target_estimation = availability in permitted_availability
+            allowed_in_spec = bool(dictionary.at[feature, "model_allowed"]) and available_for_target_estimation
+        else:
+            role = "unknown"
+            availability = "unknown"
+            available_for_target_estimation = False
+            allowed_in_spec = False
+        rows.append({"model": spec.name, "feature": feature, "role": role, "availability": availability, "available_for_target_estimation": available_for_target_estimation, "allowed_in_spec": allowed_in_spec})
+    audit = pd.DataFrame(rows)
+    invalid = audit[~audit.allowed_in_spec]
+    if not invalid.empty:
+        raise RuntimeError("Predictor availability violation: " + ", ".join(invalid.feature.astype(str)))
+    forbidden_roles = {"endpoint_observation", "post_interval_audit", "global_standardization_audit"}
+    forbidden = audit[audit.role.isin(forbidden_roles)]
+    if not forbidden.empty:
+        raise RuntimeError("Endpoint or post-outcome information entered the predictor set: " + ", ".join(forbidden.feature.astype(str)))
+    return audit
 
 def data_quality_audit(data: pd.DataFrame) -> pd.DataFrame:
     rows = []
@@ -478,6 +531,7 @@ def prepare_data(path: Path) -> pd.DataFrame:
     data["t1_date"] = pd.to_datetime(data["event_date"], errors="coerce") if "event_date" in data.columns else pd.NaT
     data["t0_year"] = data.t0_date.dt.year.astype(float) if data.t0_date.notna().any() else pd.to_numeric(data.get("previous_event_year", np.nan), errors="coerce")
     data["t1_year"] = data.t1_date.dt.year.astype(float) if data.t1_date.notna().any() else pd.to_numeric(data.event_year, errors="coerce")
+    data["target_year"] = data.t0_year.to_numpy(float) + data.dt_years.to_numpy(float)
     data["midpoint_year"] = 0.5 * (data.t0_year.to_numpy(float) + data.t1_year.to_numpy(float))
     for stage, scale in [("young", 200.0), ("mature", 800.0)]:
         area, source = infer_baseline_sampling_area(data, stage)
@@ -754,6 +808,8 @@ class DemographicScaffold:
         climate_override: ClimateTransform | None = None,
         multistart_override: int | None = None,
         max_nfev_override: int | None = None,
+        sample_weight_young: np.ndarray | None = None,
+        sample_weight_mature: np.ndarray | None = None,
     ) -> "DemographicScaffold":
         rng = np.random.default_rng(seed)
         climate = climate_override if use_climate and climate_override is not None else ClimateTransform.fit(data, seed) if use_climate else None
@@ -769,8 +825,18 @@ class DemographicScaffold:
             bounded_logit(0.06, H_MIN, H_MAX), 0.0, 0.0,
             np.log(0.03), np.log(0.04), np.log(0.02), np.log(0.05),
         ])
-        young_weight = np.sqrt(np.clip(data.young_area_precision.to_numpy(float), 0.5, 2.0)) if use_precision_weights else np.ones(len(data))
-        mature_weight = np.sqrt(np.clip(data.mature_area_precision.to_numpy(float), 0.5, 2.0)) if use_precision_weights else np.ones(len(data))
+        if sample_weight_young is not None:
+            young_weight = np.sqrt(np.maximum(np.asarray(sample_weight_young, dtype=float), 1e-12))
+        elif use_precision_weights:
+            young_weight = np.sqrt(np.clip(data.young_area_precision.to_numpy(float), 0.5, 2.0))
+        else:
+            young_weight = np.ones(len(data))
+        if sample_weight_mature is not None:
+            mature_weight = np.sqrt(np.maximum(np.asarray(sample_weight_mature, dtype=float), 1e-12))
+        elif use_precision_weights:
+            mature_weight = np.sqrt(np.clip(data.mature_area_precision.to_numpy(float), 0.5, 2.0))
+        else:
+            mature_weight = np.ones(len(data))
         young_scale = np.std(data.delta_u_log.to_numpy(float)) + 0.10
         mature_scale = np.std(data.delta_v_log.to_numpy(float)) + 0.05
 
@@ -893,9 +959,10 @@ def cross_fitted_teacher_targets(data: pd.DataFrame, spec: ModelSpec, config: Co
         prediction_v[valid] = np.maximum(model_v.predict(xv), 0.0) if model_v is not None else data.iloc[valid].v0_log.to_numpy(float)
     actual_u = data.u1_log.to_numpy(float)
     actual_v = data.v1_log.to_numpy(float)
-    for prediction, actual in [(prediction_u, actual_u), (prediction_v, actual_v)]:
-        missing = ~np.isfinite(prediction)
-        prediction[missing] = actual[missing]
+    missing_u = ~np.isfinite(prediction_u)
+    missing_v = ~np.isfinite(prediction_v)
+    prediction_u[missing_u] = data.u0_log.to_numpy(float)[missing_u]
+    prediction_v[missing_v] = data.v0_log.to_numpy(float)[missing_v]
     if spec.use_occurrence:
         mask_u = data.positive_u1.to_numpy(int) == 1
         mask_v = data.positive_v1.to_numpy(int) == 1
@@ -1057,9 +1124,15 @@ class SparseRBFDiscrepancy:
         spec: ModelSpec,
         config: Configuration,
         ridge_scale: float,
+        gammas: tuple[float, ...] | None = None,
+        kernel_weights: tuple[float, ...] | None = None,
+        sample_weight_young: np.ndarray | None = None,
+        sample_weight_mature: np.ndarray | None = None,
     ) -> "SparseRBFDiscrepancy":
         x = transform.transform(data)
-        phi = cls.rbf_features(x, centers, config.kernel_gammas, config.kernel_weights)
+        gammas = tuple(config.kernel_gammas if gammas is None else gammas)
+        kernel_weights = tuple(config.kernel_weights if kernel_weights is None else kernel_weights)
+        phi = cls.rbf_features(x, centers, gammas, kernel_weights)
         base_u = data.u0_log.to_numpy(float)
         base_v = data.v0_log.to_numpy(float)
         residual_u = target_endpoint_u - base_u - gate * (scaffold_u - base_u)
@@ -1070,13 +1143,23 @@ class SparseRBFDiscrepancy:
             mask_u = np.ones(len(data), dtype=bool)
         if mask_v.sum() < 5:
             mask_v = np.ones(len(data), dtype=bool)
-        weight_u = np.clip(data.young_area_precision.to_numpy(float), 0.5, 3.0) if spec.use_precision_weights else np.ones(len(data))
-        weight_v = np.clip(data.mature_area_precision.to_numpy(float), 0.5, 3.0) if spec.use_precision_weights else np.ones(len(data))
+        if sample_weight_young is not None:
+            weight_u = np.maximum(np.asarray(sample_weight_young, dtype=float), 1e-12)
+        elif spec.use_precision_weights:
+            weight_u = np.clip(data.young_area_precision.to_numpy(float), 0.5, 3.0)
+        else:
+            weight_u = np.ones(len(data))
+        if sample_weight_mature is not None:
+            weight_v = np.maximum(np.asarray(sample_weight_mature, dtype=float), 1e-12)
+        elif spec.use_precision_weights:
+            weight_v = np.clip(data.mature_area_precision.to_numpy(float), 0.5, 3.0)
+        else:
+            weight_v = np.ones(len(data))
         ridge_u = config.young_kernel_ridge * ridge_scale
         ridge_v = config.mature_kernel_ridge * ridge_scale
         coefficients_u = cls.solve_ridge(phi[mask_u], residual_u[mask_u], weight_u[mask_u], ridge_u, config.kernel_jitter)
         coefficients_v = cls.solve_ridge(phi[mask_v], residual_v[mask_v], weight_v[mask_v], ridge_v, config.kernel_jitter)
-        return cls(transform, centers, coefficients_u, coefficients_v, config.kernel_gammas, config.kernel_weights, (ridge_u, ridge_v))
+        return cls(transform, centers, coefficients_u, coefficients_v, gammas, kernel_weights, (ridge_u, ridge_v))
 
     def features(self, data: pd.DataFrame) -> np.ndarray:
         return self.rbf_features(self.transform.transform(data), self.centers, self.gammas, self.kernel_weights)
@@ -1174,6 +1257,7 @@ class TRACETrainingContext:
     data: pd.DataFrame
     spec: ModelSpec
     config: Configuration
+    seed: int
     scaffold: DemographicScaffold | None
     transform: FeatureTransform
     centers: np.ndarray
@@ -1183,12 +1267,29 @@ class TRACETrainingContext:
     teacher_audit: dict[str, Any]
     scaffold_u: np.ndarray
     scaffold_v: np.ndarray
+    estimation_weight_young: np.ndarray | None
+    estimation_weight_mature: np.ndarray | None
+    estimation_weight_audit: pd.DataFrame
 
     @classmethod
     def prepare(cls, data: pd.DataFrame, spec: ModelSpec, config: Configuration, seed: int) -> "TRACETrainingContext":
-        scaffold = DemographicScaffold.fit(data, config, seed + 101, spec.use_climate, spec.use_precision_weights) if spec.use_scaffold else None
+        if spec.use_variance_weights:
+            weight_u, weight_v, weight_audit = cross_fitted_estimation_weights(data, config, seed + 17)
+        else:
+            weight_u, weight_v = None, None
+            weight_audit = pd.DataFrame([{"mode": "disabled", "rows": len(data), "sites": int(data.siteID.nunique())}])
+        scaffold = DemographicScaffold.fit(
+            data,
+            config,
+            seed + 101,
+            spec.use_climate,
+            spec.use_precision_weights,
+            sample_weight_young=weight_u,
+            sample_weight_mature=weight_v,
+        ) if spec.use_scaffold else None
         teacher_u, teacher_v, teacher_audit = cross_fitted_teacher_targets(data, spec, config, seed + 202)
         transform = FeatureTransform.fit(data, spec, config, seed + 303)
+        predictor_availability_audit(data, spec, transform.feature_names)
         x = transform.transform(data)
         centers = SparseRBFDiscrepancy.select_centers(x, config.rbf_centers, seed + 404)
         occurrence = OccurrenceLayer.fit(data, transform, config, seed + 505) if spec.use_occurrence else None
@@ -1197,17 +1298,31 @@ class TRACETrainingContext:
         scaffold_u, scaffold_v = scaffold.predict(data) if scaffold is not None else (base_u.copy(), base_v.copy())
         if occurrence is not None:
             teacher_audit = {**teacher_audit, **occurrence.audit()}
-        return cls(data, spec, config, scaffold, transform, centers, occurrence, teacher_u, teacher_v, teacher_audit, scaffold_u, scaffold_v)
+        teacher_audit = {**teacher_audit, "variance_weighting": bool(spec.use_variance_weights), "legacy_precision_weighting": bool(spec.use_precision_weights)}
+        return cls(data, spec, config, seed, scaffold, transform, centers, occurrence, teacher_u, teacher_v, teacher_audit, scaffold_u, scaffold_v, weight_u, weight_v, weight_audit)
 
-    def endpoint_targets(self) -> tuple[np.ndarray, np.ndarray]:
+    def endpoint_targets(self, hyper: HyperParameters) -> tuple[np.ndarray, np.ndarray]:
         actual_u = self.data.u1_log.to_numpy(float)
         actual_v = self.data.v1_log.to_numpy(float)
-        weight = self.config.distillation_data_weight if self.spec.use_teacher else 1.0
+        weight = float(np.clip(hyper.distillation_weight, 0.0, 1.0)) if self.spec.use_teacher else 1.0
         return (1.0 - weight) * self.teacher_u + weight * actual_u, (1.0 - weight) * self.teacher_v + weight * actual_v
 
     def fit(self, hyper: HyperParameters) -> "TRACEModel":
-        target_u, target_v = self.endpoint_targets()
-        gate = hyper.gate if self.spec.use_scaffold else 0.0
+        gate = float(np.clip(hyper.gate, 0.0, 1.0)) if self.spec.use_scaffold else 0.0
+        distillation_weight = float(np.clip(hyper.distillation_weight, 0.0, 1.0)) if self.spec.use_teacher else 1.0
+        occurrence_gate = float(np.clip(hyper.occurrence_gate, 0.0, 1.0)) if self.spec.use_occurrence else 0.0
+        gamma_scale = max(float(hyper.gamma_scale), 1e-6)
+        kernel_alpha = float(np.clip(hyper.kernel_alpha, 0.0, 1.0))
+        effective = HyperParameters(gate, float(hyper.ridge_scale), distillation_weight, occurrence_gate, gamma_scale, kernel_alpha)
+        target_u, target_v = self.endpoint_targets(effective)
+        gammas = tuple(float(gamma * gamma_scale) for gamma in self.config.kernel_gammas)
+        if len(gammas) == 2:
+            kernel_weights = (kernel_alpha, 1.0 - kernel_alpha)
+        else:
+            raw = np.asarray(self.config.kernel_weights, dtype=float)
+            raw = np.maximum(raw, 0.0)
+            raw = raw / raw.sum() if raw.sum() > 0 else np.full(len(raw), 1.0 / len(raw))
+            kernel_weights = tuple(float(value) for value in raw)
         discrepancy = SparseRBFDiscrepancy.fit_prepared(
             self.data,
             self.transform,
@@ -1219,9 +1334,13 @@ class TRACETrainingContext:
             gate,
             self.spec,
             self.config,
-            hyper.ridge_scale,
+            effective.ridge_scale,
+            gammas=gammas,
+            kernel_weights=kernel_weights,
+            sample_weight_young=self.estimation_weight_young,
+            sample_weight_mature=self.estimation_weight_mature,
         )
-        return TRACEModel(self.spec, HyperParameters(gate, hyper.ridge_scale), self.scaffold, discrepancy, self.occurrence, self.teacher_audit)
+        return TRACEModel(self.spec, effective, self.scaffold, discrepancy, self.occurrence, self.teacher_audit, self.estimation_weight_audit.copy())
 
 @dataclass
 class TRACEModel:
@@ -1231,6 +1350,7 @@ class TRACEModel:
     discrepancy: SparseRBFDiscrepancy
     occurrence: OccurrenceLayer | None
     teacher_audit: dict[str, Any]
+    estimation_weight_audit: pd.DataFrame
 
     @classmethod
     def fit(cls, data: pd.DataFrame, spec: ModelSpec, hyper: HyperParameters, config: Configuration, seed: int) -> "TRACEModel":
@@ -1246,10 +1366,17 @@ class TRACEModel:
         magnitude_u = np.maximum(base_u + gated_u + residual_u, 0.0)
         magnitude_v = np.maximum(base_v + gated_v + residual_v, 0.0)
         probability_u, probability_v = self.occurrence.predict(data) if self.occurrence is not None else (np.ones(len(data)), np.ones(len(data)))
-        prediction_u = probability_u * magnitude_u
-        prediction_v = probability_v * magnitude_v
         original_mean_u = probability_u * np.expm1(magnitude_u)
         original_mean_v = probability_v * np.expm1(magnitude_v)
+        hurdle_original_log_u = np.log1p(np.maximum(original_mean_u, 0.0))
+        hurdle_original_log_v = np.log1p(np.maximum(original_mean_v, 0.0))
+        legacy_log_expectation_u = probability_u * magnitude_u
+        legacy_log_expectation_v = probability_v * magnitude_v
+        h = self.hyper.occurrence_gate if self.occurrence is not None else 0.0
+        prediction_u = (1.0 - h) * magnitude_u + h * hurdle_original_log_u
+        prediction_v = (1.0 - h) * magnitude_v + h * hurdle_original_log_v
+        point_scale_u = np.expm1(np.maximum(prediction_u, 0.0))
+        point_scale_v = np.expm1(np.maximum(prediction_v, 0.0))
         return {
             "base_u": base_u,
             "base_v": base_v,
@@ -1265,10 +1392,18 @@ class TRACEModel:
             "magnitude_v": magnitude_v,
             "positive_probability_u": probability_u,
             "positive_probability_v": probability_v,
+            "hurdle_original_log_u": hurdle_original_log_u,
+            "hurdle_original_log_v": hurdle_original_log_v,
+            "legacy_log_expectation_u": legacy_log_expectation_u,
+            "legacy_log_expectation_v": legacy_log_expectation_v,
+            "distribution_log_mean_u": legacy_log_expectation_u,
+            "distribution_log_mean_v": legacy_log_expectation_v,
             "pred_u": prediction_u,
             "pred_v": prediction_v,
             "original_scale_mean_u": original_mean_u,
             "original_scale_mean_v": original_mean_v,
+            "point_scale_u": point_scale_u,
+            "point_scale_v": point_scale_v,
         }
 
     def point_prediction_frame(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -1289,6 +1424,14 @@ class TRACEModel:
             "positive_magnitude_v_log": c["magnitude_v"],
             "positive_probability_u": c["positive_probability_u"],
             "positive_probability_v": c["positive_probability_v"],
+            "hurdle_original_mean_u_log": c["hurdle_original_log_u"],
+            "hurdle_original_mean_v_log": c["hurdle_original_log_v"],
+            "legacy_hurdle_expectation_u_log": c["legacy_log_expectation_u"],
+            "legacy_hurdle_expectation_v_log": c["legacy_log_expectation_v"],
+            "occurrence_adjustment_u_log": c["pred_u"] - c["magnitude_u"],
+            "occurrence_adjustment_v_log": c["pred_v"] - c["magnitude_v"],
+            "point_estimate_u_kha": c["point_scale_u"],
+            "point_estimate_v_kha": c["point_scale_v"],
             "point_mean_u_kha": c["original_scale_mean_u"],
             "point_mean_v_kha": c["original_scale_mean_v"],
         })
@@ -1330,8 +1473,14 @@ class DirectBenchmark:
             mature_model = Ridge(alpha=alpha)
         else:
             raise ValueError(f"Unknown benchmark: {name}")
-        weight_u = np.clip(data.young_area_precision.to_numpy(float), 0.5, 3.0) if spec.use_precision_weights else None
-        weight_v = np.clip(data.mature_area_precision.to_numpy(float), 0.5, 3.0) if spec.use_precision_weights else None
+        if spec.use_variance_weights:
+            weight_u, weight_v, _ = cross_fitted_estimation_weights(data, config, seed + 901)
+        elif spec.use_precision_weights:
+            weight_u = np.clip(data.young_area_precision.to_numpy(float), 0.5, 3.0)
+            weight_v = np.clip(data.mature_area_precision.to_numpy(float), 0.5, 3.0)
+        else:
+            weight_u = None
+            weight_v = None
         young_model.fit(x[mask_u], y_u[mask_u], sample_weight=weight_u[mask_u] if weight_u is not None else None)
         mature_model.fit(x[mask_v], y_v[mask_v], sample_weight=weight_v[mask_v] if weight_v is not None else None)
         occurrence = OccurrenceLayer.fit(data, transform, config, seed + 1000) if hurdle else None
@@ -1344,15 +1493,25 @@ class DirectBenchmark:
         if self.occurrence is None:
             return magnitude_u, magnitude_v
         p_u, p_v = self.occurrence.predict(data)
-        return p_u * magnitude_u, p_v * magnitude_v
+        h = float(np.clip(self.parameters.get("occurrence_gate", 1.0), 0.0, 1.0))
+        a_u = np.log1p(p_u * np.expm1(magnitude_u))
+        a_v = np.log1p(p_v * np.expm1(magnitude_v))
+        return (1.0 - h) * magnitude_u + h * a_u, (1.0 - h) * magnitude_v + h * a_v
 
 def benchmark_parameter_grid(name: str) -> list[dict[str, Any]]:
-    if name in {"Extra Trees direct", "Hurdle Extra Trees"}:
+    if name == "Extra Trees direct":
         return [
             {"max_depth": 7, "min_samples_leaf": 6},
             {"max_depth": 10, "min_samples_leaf": 6},
             {"max_depth": 10, "min_samples_leaf": 10},
         ]
+    if name == "Hurdle Extra Trees":
+        structures = [
+            {"max_depth": 7, "min_samples_leaf": 6},
+            {"max_depth": 10, "min_samples_leaf": 6},
+            {"max_depth": 10, "min_samples_leaf": 10},
+        ]
+        return [{**structure, "occurrence_gate": float(h)} for structure in structures for h in (0.0, 0.5, 1.0)]
     if name == "Histogram boosting direct":
         return [
             {"max_leaf_nodes": 7, "l2_regularization": 1.0, "learning_rate": 0.05},
@@ -1381,38 +1540,102 @@ def tuning_score(data: pd.DataFrame, pred_u: np.ndarray, pred_v: np.ndarray, zer
     zero = float(np.mean(parts)) if parts else overall
     return (1.0 - zero_weight) * overall + zero_weight * zero, overall, zero
 
+def default_hyperparameters(spec: ModelSpec) -> HyperParameters:
+    return HyperParameters(
+        gate=0.25 if spec.use_scaffold else 0.0,
+        ridge_scale=1.0,
+        distillation_weight=0.75 if spec.use_teacher else 1.0,
+        occurrence_gate=1.0 if spec.use_occurrence else 0.0,
+        gamma_scale=1.0,
+        kernel_alpha=0.50,
+    )
+
+def trace_stage_candidates(stage: str, current: HyperParameters, spec: ModelSpec, config: Configuration) -> list[HyperParameters]:
+    candidates = []
+    if stage in {"representation", "representation_refinement"}:
+        for gamma_scale in config.gamma_scale_grid:
+            for kernel_alpha in config.kernel_alpha_grid:
+                candidates.append(replace(current, gamma_scale=float(gamma_scale), kernel_alpha=float(kernel_alpha)))
+    elif stage == "teacher":
+        values = config.distillation_weight_grid if spec.use_teacher else (1.0,)
+        candidates = [replace(current, distillation_weight=float(value)) for value in values]
+    elif stage == "occurrence":
+        values = config.occurrence_gate_grid if spec.use_occurrence else (0.0,)
+        candidates = [replace(current, occurrence_gate=float(value)) for value in values]
+    elif stage == "structural":
+        gates = config.gate_grid if spec.use_scaffold else (0.0,)
+        for ridge_scale in config.ridge_scale_grid:
+            for gate in gates:
+                candidates.append(replace(current, gate=float(gate), ridge_scale=float(ridge_scale)))
+    else:
+        raise ValueError(f"Unknown TRACE tuning stage: {stage}")
+    unique = []
+    seen = set()
+    for candidate in candidates:
+        key = tuple(asdict(candidate).values())
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+def hyperparameter_record(hyper: HyperParameters) -> dict[str, float]:
+    return {
+        "gate": float(hyper.gate),
+        "ridge_scale": float(hyper.ridge_scale),
+        "distillation_weight": float(hyper.distillation_weight),
+        "occurrence_gate": float(hyper.occurrence_gate),
+        "gamma_scale": float(hyper.gamma_scale),
+        "kernel_alpha": float(hyper.kernel_alpha),
+    }
+
 def tune_trace_model(data: pd.DataFrame, spec: ModelSpec, config: Configuration, seed: int) -> tuple[HyperParameters, pd.DataFrame]:
+    current = default_hyperparameters(spec)
     if not config.tune_model:
-        hyper = HyperParameters(gate=0.25 if spec.use_scaffold else 0.0, ridge_scale=1.0)
-        return hyper, pd.DataFrame()
+        return current, pd.DataFrame()
     groups = data.siteID.astype(str).to_numpy()
     splits = min(config.inner_folds, np.unique(groups).size)
     if splits < 2:
-        hyper = HyperParameters(gate=0.25 if spec.use_scaffold else 0.0, ridge_scale=1.0)
-        return hyper, pd.DataFrame()
-    gates = config.gate_grid if spec.use_scaffold else (0.0,)
-    rows = []
+        return current, pd.DataFrame()
     indices = np.arange(len(data))
+    prepared = []
     for inner_fold, (train_index, valid_index) in enumerate(GroupKFold(splits).split(indices, groups=groups), 1):
         train = data.iloc[train_index].reset_index(drop=True)
         valid = data.iloc[valid_index].reset_index(drop=True)
+        if set(train.siteID.astype(str)) & set(valid.siteID.astype(str)):
+            raise RuntimeError("Inner-CV site overlap detected")
         context = TRACETrainingContext.prepare(train, spec, config, seed + inner_fold * 100003)
-        for ridge_scale in config.ridge_scale_grid:
-            for gate in gates:
-                candidate = HyperParameters(float(gate), float(ridge_scale))
+        prepared.append((inner_fold, context, valid))
+    stages = ["representation", "teacher", "occurrence", "structural"]
+    if config.tuning_refinement and len(config.gamma_scale_grid) * len(config.kernel_alpha_grid) > 1:
+        stages.append("representation_refinement")
+    all_rows = []
+    for stage_index, stage in enumerate(stages, 1):
+        candidates = trace_stage_candidates(stage, current, spec, config)
+        rows = []
+        for candidate_index, candidate in enumerate(candidates):
+            for inner_fold, context, valid in prepared:
                 model = context.fit(candidate)
                 components = model.components(valid)
                 objective, overall, zero = tuning_score(valid, components["pred_u"], components["pred_v"], config.tuning_zero_weight)
-                rows.append({"model": spec.name, "inner_fold": inner_fold, "gate": candidate.gate, "ridge_scale": candidate.ridge_scale, "objective": objective, "overall_normalized_RMSE": overall, "zero_origin_normalized_RMSE": zero, "residual_refit_for_candidate_gate": True})
-    table = pd.DataFrame(rows)
-    summary = table.groupby(["model", "gate", "ridge_scale"], as_index=False).agg(objective=("objective", "mean"), objective_sd=("objective", "std"), overall_normalized_RMSE=("overall_normalized_RMSE", "mean"), zero_origin_normalized_RMSE=("zero_origin_normalized_RMSE", "mean"))
-    best = summary.sort_values(["objective", "gate", "ridge_scale"]).iloc[0]
-    selected = HyperParameters(float(best.gate), float(best.ridge_scale))
-    table["selected"] = (table.gate == selected.gate) & (table.ridge_scale == selected.ridge_scale)
-    summary["inner_fold"] = 0
-    summary["selected"] = (summary.gate == selected.gate) & (summary.ridge_scale == selected.ridge_scale)
-    summary["residual_refit_for_candidate_gate"] = True
-    return selected, pd.concat([table, summary], ignore_index=True, sort=False)
+                rows.append({"model": spec.name, "stage": stage, "stage_index": stage_index, "candidate_index": candidate_index, "inner_fold": inner_fold, **hyperparameter_record(candidate), "objective": objective, "overall_normalized_RMSE": overall, "zero_origin_normalized_RMSE": zero, "candidate_refitted": True, "site_grouped_inner_cv": True})
+        table = pd.DataFrame(rows)
+        hyper_columns = ["gate", "ridge_scale", "distillation_weight", "occurrence_gate", "gamma_scale", "kernel_alpha"]
+        summary = table.groupby(["model", "stage", "stage_index", "candidate_index", *hyper_columns], as_index=False).agg(objective=("objective", "mean"), objective_sd=("objective", "std"), overall_normalized_RMSE=("overall_normalized_RMSE", "mean"), zero_origin_normalized_RMSE=("zero_origin_normalized_RMSE", "mean"))
+        best = summary.sort_values(["objective", "candidate_index"]).iloc[0]
+        current = HyperParameters(float(best.gate), float(best.ridge_scale), float(best.distillation_weight), float(best.occurrence_gate), float(best.gamma_scale), float(best.kernel_alpha))
+        selected_mask = np.ones(len(table), dtype=bool)
+        for column, value in hyperparameter_record(current).items():
+            selected_mask &= np.isclose(table[column].to_numpy(float), value)
+        table["selected"] = selected_mask
+        summary["inner_fold"] = 0
+        selected_summary = np.ones(len(summary), dtype=bool)
+        for column, value in hyperparameter_record(current).items():
+            selected_summary &= np.isclose(summary[column].to_numpy(float), value)
+        summary["selected"] = selected_summary
+        summary["candidate_refitted"] = True
+        summary["site_grouped_inner_cv"] = True
+        all_rows.extend([table, summary])
+    return current, pd.concat(all_rows, ignore_index=True, sort=False) if all_rows else pd.DataFrame()
 
 def tune_direct_benchmark(data: pd.DataFrame, name: str, spec: ModelSpec, config: Configuration, seed: int) -> tuple[dict[str, Any], pd.DataFrame]:
     grid = benchmark_parameter_grid(name)
@@ -1455,14 +1678,87 @@ def expected_count_from_components(data: pd.DataFrame, components: dict[str, np.
     density_mean = components[f"positive_probability_{key}"] * np.expm1(np.maximum(components[f"magnitude_{key}"], 0.0))
     return np.maximum(density_mean * area / 10.0, 0.0)
 
-def estimate_stochastic_layer(data: pd.DataFrame, components: dict[str, np.ndarray], config: Configuration) -> dict[str, float]:
-    residual_u = data.u1_log.to_numpy(float) - components["pred_u"]
-    residual_v = data.v1_log.to_numpy(float) - components["pred_v"]
+def persistence_reference_components(data: pd.DataFrame) -> dict[str, np.ndarray]:
+    base_u = data.u0_log.to_numpy(float)
+    base_v = data.v0_log.to_numpy(float)
+    ones = np.ones(len(data), dtype=float)
+    return {
+        "pred_u": base_u.copy(),
+        "pred_v": base_v.copy(),
+        "magnitude_u": base_u.copy(),
+        "magnitude_v": base_v.copy(),
+        "positive_probability_u": ones.copy(),
+        "positive_probability_v": ones.copy(),
+        "distribution_log_mean_u": base_u.copy(),
+        "distribution_log_mean_v": base_v.copy(),
+    }
+
+def predictive_variance_from_components(data: pd.DataFrame, components: dict[str, np.ndarray], stochastic: dict[str, float], config: Configuration) -> tuple[np.ndarray, np.ndarray]:
     dt = data.dt_years.to_numpy(float)
     expected_u = expected_count_from_components(data, components, "u")
     expected_v = expected_count_from_components(data, components, "v")
-    obs_u = 1.0 / (expected_u + 0.5)
-    obs_v = 1.0 / (expected_v + 0.5)
+    offset = max(float(config.variance_count_offset), 1e-6)
+    variance_u = stochastic["sigma_young"] ** 2 * dt + stochastic["observation_scale_young"] ** 2 / (expected_u + offset)
+    variance_v = stochastic["sigma_mature"] ** 2 * dt + stochastic["observation_scale_mature"] ** 2 / (expected_v + offset)
+    return np.maximum(variance_u, 1e-10), np.maximum(variance_v, 1e-10)
+
+def normalize_inverse_variance_weights(values: np.ndarray, config: Configuration) -> tuple[np.ndarray, dict[str, float]]:
+    weight = np.asarray(values, dtype=float)
+    finite = weight[np.isfinite(weight) & (weight > 0)]
+    if finite.size == 0:
+        return np.ones(len(weight), dtype=float), {"raw_min": np.nan, "raw_max": np.nan, "clip_low": np.nan, "clip_high": np.nan, "normalized_min": 1.0, "normalized_max": 1.0}
+    low = float(np.quantile(finite, config.variance_weight_lower_quantile))
+    high = float(np.quantile(finite, config.variance_weight_upper_quantile))
+    if not np.isfinite(low) or not np.isfinite(high) or high <= 0:
+        low, high = float(np.min(finite)), float(np.max(finite))
+    if high < low:
+        low, high = high, low
+    clipped = np.clip(np.where(np.isfinite(weight) & (weight > 0), weight, np.median(finite)), max(low, 1e-12), max(high, max(low, 1e-12)))
+    mean = float(np.mean(clipped))
+    normalized = clipped / mean if mean > 0 else np.ones(len(clipped), dtype=float)
+    return normalized, {"raw_min": float(np.min(finite)), "raw_max": float(np.max(finite)), "clip_low": low, "clip_high": high, "normalized_min": float(np.min(normalized)), "normalized_max": float(np.max(normalized))}
+
+def cross_fitted_estimation_weights(data: pd.DataFrame, config: Configuration, seed: int) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    groups = data.siteID.astype(str).to_numpy()
+    unique_sites = np.unique(groups)
+    splits = min(max(2, int(config.variance_weight_folds)), unique_sites.size)
+    if splits < 2:
+        return np.ones(len(data)), np.ones(len(data)), pd.DataFrame([{"mode": "uniform_fallback", "rows": len(data), "sites": int(unique_sites.size)}])
+    indices = np.arange(len(data))
+    raw_u = np.full(len(data), np.nan, dtype=float)
+    raw_v = np.full(len(data), np.nan, dtype=float)
+    rows = []
+    for fold, (train_index, valid_index) in enumerate(GroupKFold(splits).split(indices, groups=groups), 1):
+        train = data.iloc[train_index].reset_index(drop=True)
+        valid = data.iloc[valid_index].reset_index(drop=True)
+        if set(train.siteID.astype(str)) & set(valid.siteID.astype(str)):
+            raise RuntimeError("Variance-weight cross-fitting site overlap detected")
+        train_components = persistence_reference_components(train)
+        stochastic = estimate_stochastic_layer(train, train_components, config)
+        valid_components = persistence_reference_components(valid)
+        variance_u, variance_v = predictive_variance_from_components(valid, valid_components, stochastic, config)
+        raw_u[valid_index] = 1.0 / variance_u
+        raw_v[valid_index] = 1.0 / variance_v
+        rows.append({"fold": fold, "train_sites": int(train.siteID.nunique()), "validation_sites": int(valid.siteID.nunique()), "site_overlap": 0, "reference": "persistence", "sigma_young": stochastic["sigma_young"], "sigma_mature": stochastic["sigma_mature"], "observation_scale_young": stochastic["observation_scale_young"], "observation_scale_mature": stochastic["observation_scale_mature"]})
+    if np.any(~np.isfinite(raw_u)) or np.any(~np.isfinite(raw_v)):
+        raise RuntimeError("Cross-fitted inverse-variance weights contain non-finite values")
+    weight_u, audit_u = normalize_inverse_variance_weights(raw_u, config)
+    weight_v, audit_v = normalize_inverse_variance_weights(raw_v, config)
+    summary = {"fold": 0, "train_sites": int(data.siteID.nunique()), "validation_sites": int(data.siteID.nunique()), "site_overlap": 0, "reference": "persistence_cross_fitted", **{f"young_{k}": v for k, v in audit_u.items()}, **{f"mature_{k}": v for k, v in audit_v.items()}, "young_mean": float(np.mean(weight_u)), "mature_mean": float(np.mean(weight_v))}
+    rows.append(summary)
+    return weight_u, weight_v, pd.DataFrame(rows)
+
+def estimate_stochastic_layer(data: pd.DataFrame, components: dict[str, np.ndarray], config: Configuration) -> dict[str, float]:
+    center_u = components.get("distribution_log_mean_u", components["pred_u"])
+    center_v = components.get("distribution_log_mean_v", components["pred_v"])
+    residual_u = data.u1_log.to_numpy(float) - center_u
+    residual_v = data.v1_log.to_numpy(float) - center_v
+    dt = data.dt_years.to_numpy(float)
+    expected_u = expected_count_from_components(data, components, "u")
+    expected_v = expected_count_from_components(data, components, "v")
+    offset = max(float(config.variance_count_offset), 1e-6)
+    obs_u = 1.0 / (expected_u + offset)
+    obs_v = 1.0 / (expected_v + offset)
 
     def estimate(residual: np.ndarray, observation_variance: np.ndarray) -> tuple[float, float]:
         squared = residual * residual
@@ -1487,12 +1783,13 @@ def estimate_stochastic_layer(data: pd.DataFrame, components: dict[str, np.ndarr
         "observation_scale_young": observation_u,
         "observation_scale_mature": observation_v,
         "endpoint_noise_correlation": float(np.clip(correlation, -0.90, 0.90)),
+        "count_offset": offset,
     }
 
 def fit_stochastic_layer_cross_fitted(data: pd.DataFrame, spec: ModelSpec, hyper: HyperParameters, config: Configuration, seed: int) -> tuple[dict[str, float], pd.DataFrame]:
     groups = data.siteID.astype(str).to_numpy()
     splits = min(config.stochastic_folds, np.unique(groups).size)
-    fields = ["pred_u", "pred_v", "magnitude_u", "magnitude_v", "positive_probability_u", "positive_probability_v"]
+    fields = ["pred_u", "pred_v", "magnitude_u", "magnitude_v", "positive_probability_u", "positive_probability_v", "distribution_log_mean_u", "distribution_log_mean_v"]
     assembled = {field: np.full(len(data), np.nan, dtype=float) for field in fields}
     rows = []
     if splits < 2:
@@ -1526,8 +1823,8 @@ def simulate_endpoint_draws(data: pd.DataFrame, components: dict[str, np.ndarray
     z2 = correlation * z1 + math.sqrt(max(1.0 - correlation * correlation, 1e-8)) * z2i
     expected_u = expected_count_from_components(data, components, "u")
     expected_v = expected_count_from_components(data, components, "v")
-    observation_sd_u = stochastic["observation_scale_young"] / np.sqrt(expected_u + 0.5)
-    observation_sd_v = stochastic["observation_scale_mature"] / np.sqrt(expected_v + 0.5)
+    observation_sd_u = stochastic["observation_scale_young"] / np.sqrt(expected_u + stochastic.get("count_offset", 0.5))
+    observation_sd_v = stochastic["observation_scale_mature"] / np.sqrt(expected_v + stochastic.get("count_offset", 0.5))
     observation_u = rng.normal(size=(draws, n)) * observation_sd_u
     observation_v = rng.normal(size=(draws, n)) * observation_sd_v
     magnitude_u = np.maximum(components["magnitude_u"][None, :] + stochastic["sigma_young"] * root_dt[None, :] * z1 + observation_u, 0.0)
@@ -1580,8 +1877,8 @@ def simulate_log_diffusion_trace_draws(model: TRACEModel, data: pd.DataFrame, st
     base_v = components["base_v"]
     expected_u = expected_count_from_components(data, components, "u")
     expected_v = expected_count_from_components(data, components, "v")
-    observation_sd_u = stochastic["observation_scale_young"] / np.sqrt(expected_u + 0.5)
-    observation_sd_v = stochastic["observation_scale_mature"] / np.sqrt(expected_v + 0.5)
+    observation_sd_u = stochastic["observation_scale_young"] / np.sqrt(expected_u + stochastic.get("count_offset", 0.5))
+    observation_sd_v = stochastic["observation_scale_mature"] / np.sqrt(expected_v + stochastic.get("count_offset", 0.5))
     magnitude_u = np.maximum(base_u[None, :] + model.hyper.gate * (scaffold_u - base_u[None, :]) + components["discrepancy_u"][None, :] + rng.normal(size=(draws, len(data))) * observation_sd_u[None, :], 0.0)
     magnitude_v = np.maximum(base_v[None, :] + model.hyper.gate * (scaffold_v - base_v[None, :]) + components["discrepancy_v"][None, :] + rng.normal(size=(draws, len(data))) * observation_sd_v[None, :], 0.0)
     positive_u = rng.random(size=(draws, len(data))) < components["positive_probability_u"][None, :]
@@ -1638,8 +1935,8 @@ def simulate_positive_state_diffusion_trace_draws(model: TRACEModel, data: pd.Da
     base_v = components["base_v"]
     expected_u = expected_count_from_components(data, components, "u")
     expected_v = expected_count_from_components(data, components, "v")
-    observation_sd_u = stochastic["observation_scale_young"] / np.sqrt(expected_u + 0.5)
-    observation_sd_v = stochastic["observation_scale_mature"] / np.sqrt(expected_v + 0.5)
+    observation_sd_u = stochastic["observation_scale_young"] / np.sqrt(expected_u + stochastic.get("count_offset", 0.5))
+    observation_sd_v = stochastic["observation_scale_mature"] / np.sqrt(expected_v + stochastic.get("count_offset", 0.5))
     magnitude_u = np.maximum(base_u[None, :] + model.hyper.gate * (scaffold_u - base_u[None, :]) + components["discrepancy_u"][None, :] + rng.normal(size=(draws, len(data))) * observation_sd_u[None, :], 0.0)
     magnitude_v = np.maximum(base_v[None, :] + model.hyper.gate * (scaffold_v - base_v[None, :]) + components["discrepancy_v"][None, :] + rng.normal(size=(draws, len(data))) * observation_sd_v[None, :], 0.0)
     positive_u = rng.random(size=(draws, len(data))) < components["positive_probability_u"][None, :]
@@ -1752,10 +2049,12 @@ def predictive_standardized_residuals(data: pd.DataFrame, components: dict[str, 
     dt = data.dt_years.to_numpy(float)
     expected_u = expected_count_from_components(data, components, "u")
     expected_v = expected_count_from_components(data, components, "v")
-    variance_u = stochastic["sigma_young"] ** 2 * dt + stochastic["observation_scale_young"] ** 2 / (expected_u + 0.5)
-    variance_v = stochastic["sigma_mature"] ** 2 * dt + stochastic["observation_scale_mature"] ** 2 / (expected_v + 0.5)
-    residual_u = (data.u1_log.to_numpy(float) - components["pred_u"]) / np.sqrt(np.maximum(variance_u, 1e-10))
-    residual_v = (data.v1_log.to_numpy(float) - components["pred_v"]) / np.sqrt(np.maximum(variance_v, 1e-10))
+    variance_u = stochastic["sigma_young"] ** 2 * dt + stochastic["observation_scale_young"] ** 2 / (expected_u + stochastic.get("count_offset", 0.5))
+    variance_v = stochastic["sigma_mature"] ** 2 * dt + stochastic["observation_scale_mature"] ** 2 / (expected_v + stochastic.get("count_offset", 0.5))
+    center_u = components.get("distribution_log_mean_u", components["pred_u"])
+    center_v = components.get("distribution_log_mean_v", components["pred_v"])
+    residual_u = (data.u1_log.to_numpy(float) - center_u) / np.sqrt(np.maximum(variance_u, 1e-10))
+    residual_v = (data.v1_log.to_numpy(float) - center_v) / np.sqrt(np.maximum(variance_v, 1e-10))
     return residual_u, residual_v
 
 def predict_with_calibration(model: TRACEModel, data: pd.DataFrame, calibration: CalibrationState, config: Configuration, seed: int) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -1836,10 +2135,11 @@ def standard_ablation_specs(profile: str) -> list[ModelSpec]:
         ModelSpec("Without teacher smoothing", use_teacher=False),
         ModelSpec("Without realized climate", use_climate=False),
         ModelSpec("Without coordinates", use_coordinates=False),
-        ModelSpec("Sampling-precision weights only", use_precision_features=False, use_precision_weights=True),
-        ModelSpec("Sampling-precision predictors only", use_precision_features=True, use_precision_weights=False),
-        ModelSpec("Without sampling precision", use_precision_features=False, use_precision_weights=False),
-        ModelSpec("Without occurrence hurdle", use_occurrence=False),
+        ModelSpec("Without variance-aware estimation", use_variance_weights=False),
+        ModelSpec("Legacy sampling-precision weighting", use_precision_weights=True, use_variance_weights=False),
+        ModelSpec("Without sampling-precision predictors", use_precision_features=False),
+        ModelSpec("Without sampling support information", use_precision_features=False, use_variance_weights=False),
+        ModelSpec("Without occurrence layer", use_occurrence=False),
     ]
     return specs[:1] if profile == "smoke" else specs
 
@@ -1875,6 +2175,7 @@ def run_outer_cv(data: pd.DataFrame, config: Configuration) -> dict[str, pd.Data
     parameters = []
     calibrations = []
     stochastic_audits = []
+    estimation_weight_audits = []
     trace_tunings = []
     benchmark_tunings = []
     rates = []
@@ -1902,7 +2203,7 @@ def run_outer_cv(data: pd.DataFrame, config: Configuration) -> dict[str, pd.Data
         calibration_state = fit_calibration_state(main_model, calibration, stochastic, core.siteID.astype(str).unique().tolist(), stochastic_audit, config, config.seed + fold * 100003 + 50003)
         prediction, draw_audit = predict_with_calibration(main_model, test, calibration_state, config, config.seed + fold * 100003 + 90001)
         keep = [
-            "row_id", "transition_id", "siteID", "plotID", "dt_years", "log_dt", "event_year", "decimalLatitude", "decimalLongitude",
+            "row_id", "transition_id", "siteID", "plotID", "dt_years", "log_dt", "target_year", "event_year", "decimalLatitude", "decimalLongitude",
             "u0_kha", "v0_kha", "u1_kha", "v1_kha", "u0_log", "v0_log", "u1_log", "v1_log", "zero_u0", "zero_v0", "positive_u1", "positive_v1",
             "young_baseline_area_precision", "mature_baseline_area_precision", "young_baseline_area_missing", "mature_baseline_area_missing", "young_area_precision", "mature_area_precision", "area_young_t0_m2_reconstructed", "area_mature_t0_m2_reconstructed", "area_young_m2", "area_mature_m2", "young_count_t0", "mature_count_t0", "young_count_t1", "mature_count_t1", "t0_date", "t1_date", "t0_year", "t1_year", "midpoint_year", "sequence_index_plot", "n_transitions_plot", *RAW_CLIMATE_MODEL,
         ]
@@ -1925,7 +2226,12 @@ def run_outer_cv(data: pd.DataFrame, config: Configuration) -> dict[str, pd.Data
         else:
             out[scaffold_u] = out.u0_log
             out[scaffold_v] = out.v0_log
-        model_selections.append({"outer_fold": fold, "model": main_spec.name, "gate": main_hyper.gate, "ridge_scale": main_hyper.ridge_scale, "type": "TRACE"})
+        model_selections.append({"outer_fold": fold, "model": main_spec.name, **hyperparameter_record(main_hyper), "type": "TRACE"})
+        weight_table = main_model.estimation_weight_audit.copy()
+        if not weight_table.empty:
+            weight_table.insert(0, "outer_fold", fold)
+            weight_table.insert(1, "model", main_spec.name)
+            estimation_weight_audits.append(weight_table)
         for index, ablation_spec in enumerate(standard_ablation_specs(config.profile), 1):
             hyper, tuning = tune_trace_model(core, ablation_spec, config, config.seed + fold * 1000003 + index * 70001)
             if not tuning.empty:
@@ -1936,7 +2242,7 @@ def run_outer_cv(data: pd.DataFrame, config: Configuration) -> dict[str, pd.Data
             column_u, column_v = prediction_columns_for_model(ablation_spec.name)
             out[column_u] = components["pred_u"]
             out[column_v] = components["pred_v"]
-            model_selections.append({"outer_fold": fold, "model": ablation_spec.name, "gate": hyper.gate, "ridge_scale": hyper.ridge_scale, "type": "TRACE_ablation"})
+            model_selections.append({"outer_fold": fold, "model": ablation_spec.name, **hyperparameter_record(hyper), "type": "TRACE_ablation"})
         benchmark_spec = ModelSpec("benchmark")
         for index, name in enumerate(["Extra Trees direct", "Histogram boosting direct", "Ridge direct", "Hurdle Extra Trees"], 1):
             parameters_selected, tuning = tune_direct_benchmark(core, name, benchmark_spec, config, config.seed + fold * 700001 + index * 13001)
@@ -1972,6 +2278,10 @@ def run_outer_cv(data: pd.DataFrame, config: Configuration) -> dict[str, pd.Data
             "stochastic_calibration_site_overlap": len(set(calibration_state.stochastic_source_sites) & set(calibration_state.calibration_sites)),
             "selected_gate": main_hyper.gate,
             "selected_ridge_scale": main_hyper.ridge_scale,
+            "selected_distillation_weight": main_hyper.distillation_weight,
+            "selected_occurrence_gate": main_hyper.occurrence_gate,
+            "selected_gamma_scale": main_hyper.gamma_scale,
+            "selected_kernel_alpha": main_hyper.kernel_alpha,
             "conformal_mode": config.conformal_mode,
             "conformal_q_young": calibration_state.conformal_q_young,
             "conformal_q_mature": calibration_state.conformal_q_mature,
@@ -2001,6 +2311,7 @@ def run_outer_cv(data: pd.DataFrame, config: Configuration) -> dict[str, pd.Data
         "Fold_Parameters": pd.concat(parameters, ignore_index=True) if parameters else pd.DataFrame(),
         "Calibration_Scores": pd.concat(calibrations, ignore_index=True) if calibrations else pd.DataFrame(),
         "Stochastic_Fit_Audit": pd.concat(stochastic_audits, ignore_index=True) if stochastic_audits else pd.DataFrame(),
+        "Estimation_Weight_Audit": pd.concat(estimation_weight_audits, ignore_index=True) if estimation_weight_audits else pd.DataFrame(),
         "TRACE_Tuning": pd.concat(trace_tunings, ignore_index=True) if trace_tunings else pd.DataFrame(),
         "Benchmark_Tuning": pd.concat(benchmark_tunings, ignore_index=True) if benchmark_tunings else pd.DataFrame(),
         "Model_Selections": pd.DataFrame(model_selections),
@@ -2029,10 +2340,11 @@ def model_label_from_key(key: str) -> str:
         "without_teacher_smoothing": "Without teacher smoothing",
         "without_realized_climate": "Without realized climate",
         "without_coordinates": "Without coordinates",
-        "sampling_precision_weights_only": "Sampling-precision weights only",
-        "sampling_precision_predictors_only": "Sampling-precision predictors only",
-        "without_sampling_precision": "Without sampling precision",
-        "without_occurrence_hurdle": "Without occurrence hurdle",
+        "without_variance_aware_estimation": "Without variance-aware estimation",
+        "legacy_sampling_precision_weighting": "Legacy sampling-precision weighting",
+        "without_sampling_precision_predictors": "Without sampling-precision predictors",
+        "without_sampling_support_information": "Without sampling support information",
+        "without_occurrence_layer": "Without occurrence layer",
         "extra_trees_direct": "Extra Trees direct",
         "histogram_boosting_direct": "Histogram boosting direct",
         "ridge_direct": "Ridge direct",
@@ -2298,6 +2610,78 @@ def occurrence_reliability(oof: pd.DataFrame, bins: int = 10) -> pd.DataFrame:
             if mask.sum() == 0:
                 continue
             rows.append({"stage": stage, "bin": b, "count": int(mask.sum()), "mean_predicted_probability": float(np.mean(p[mask])), "observed_positive_frequency": float(np.mean(y[mask]))})
+    return pd.DataFrame(rows)
+
+def occurrence_calibration_summary(oof: pd.DataFrame, bins: int = 10) -> pd.DataFrame:
+    rows = []
+    for stage, key in [("young", "u"), ("mature", "v")]:
+        y = oof[f"positive_{key}1"].to_numpy(int)
+        p = np.clip(oof[f"positive_probability_{key}"].to_numpy(float), 1e-6, 1 - 1e-6)
+        if np.unique(y).size > 1:
+            predictor = logit(p).reshape(-1, 1)
+            model = LogisticRegression(C=1e6, max_iter=5000).fit(predictor, y)
+            intercept = float(model.intercept_[0])
+            slope = float(model.coef_[0, 0])
+        else:
+            intercept = np.nan
+            slope = np.nan
+        edges = np.linspace(0.0, 1.0, bins + 1)
+        labels = np.clip(np.digitize(p, edges[1:-1], right=True), 0, bins - 1)
+        ece = 0.0
+        maximum_gap = 0.0
+        for b in range(bins):
+            mask = labels == b
+            if not mask.any():
+                continue
+            gap = abs(float(np.mean(p[mask])) - float(np.mean(y[mask])))
+            ece += float(mask.mean()) * gap
+            maximum_gap = max(maximum_gap, gap)
+        rows.append({"stage": stage, "calibration_intercept": intercept, "calibration_slope": slope, "ECE": float(ece), "maximum_bin_gap": float(maximum_gap), "bins": bins, "prevalence": float(np.mean(y)), "mean_probability": float(np.mean(p))})
+    return pd.DataFrame(rows)
+
+def zero_origin_support_sensitivity(oof: pd.DataFrame, config: Configuration) -> pd.DataFrame:
+    primary = prediction_columns_for_model(primary_spec().name)
+    persistence = prediction_columns_for_model("Persistence")
+    rows = []
+    tolerance = max(float(config.support_change_tolerance), 0.0)
+    for index, (stage, key) in enumerate([("young", "u"), ("mature", "v")]):
+        t0 = pd.to_numeric(oof[f"area_{stage}_t0_m2_reconstructed"], errors="coerce").to_numpy(float)
+        t1 = pd.to_numeric(oof[f"area_{stage}_m2"], errors="coerce").to_numpy(float)
+        known = np.isfinite(t0) & (t0 > 0)
+        relative_change = np.full(len(oof), np.nan, dtype=float)
+        relative_change[known] = np.abs(t1[known] - t0[known]) / np.maximum(t0[known], 1e-12)
+        comparable = known & np.isfinite(relative_change) & (relative_change <= tolerance)
+        changed = known & np.isfinite(relative_change) & (relative_change > tolerance)
+        zero_positive = (oof[f"zero_{key}0"].to_numpy(int) == 1) & (oof[f"positive_{key}1"].to_numpy(int) == 1)
+        subsets = {
+            "all_zero_to_positive": zero_positive,
+            "baseline_support_known": zero_positive & known,
+            "baseline_support_unknown": zero_positive & ~known,
+            "support_comparable": zero_positive & comparable,
+            "support_changed": zero_positive & changed,
+        }
+        for label, mask in subsets.items():
+            subset = oof.loc[mask].copy()
+            if subset.empty:
+                continue
+            y = subset[f"{key}1_log"].to_numpy(float)
+            pred = subset[primary[index]].to_numpy(float)
+            ref = subset[persistence[index]].to_numpy(float)
+            rmse_model = float(np.sqrt(mean_squared_error(y, pred)))
+            rmse_reference = float(np.sqrt(mean_squared_error(y, ref)))
+            skill = 1.0 - rmse_model / rmse_reference if rmse_reference > 1e-12 else np.nan
+            if subset.siteID.nunique() >= 2 and rmse_reference > 1e-12:
+                def statistic(frame: pd.DataFrame, key=key, pcol=primary[index], rcol=persistence[index]) -> float:
+                    yy = frame[f"{key}1_log"].to_numpy(float)
+                    rp = float(np.sqrt(mean_squared_error(yy, frame[pcol].to_numpy(float))))
+                    rr = float(np.sqrt(mean_squared_error(yy, frame[rcol].to_numpy(float))))
+                    return 1.0 - rp / rr if rr > 1e-12 else np.nan
+                distribution = bootstrap_statistic(subset, statistic, config.regime_bootstrap, config.seed + 880000 + index * 10000 + stable_int_seed(label) % 10000)
+                low, high = bootstrap_interval(distribution)
+                probability = float(np.mean(distribution > 0)) if distribution.size else np.nan
+            else:
+                low, high, probability = np.nan, np.nan, np.nan
+            rows.append({"stage": stage, "subset": label, "transitions": len(subset), "sites": int(subset.siteID.nunique()), "support_change_tolerance": tolerance, "TRACE_RMSE": rmse_model, "Persistence_RMSE": rmse_reference, "skill_vs_persistence": skill, "skill_CI_low": low, "skill_CI_high": high, "bootstrap_probability_positive_skill": probability})
     return pd.DataFrame(rows)
 
 def interval_calibration_diagnostics(oof: pd.DataFrame, config: Configuration) -> pd.DataFrame:
@@ -2580,8 +2964,9 @@ def ode_profile_objective(scaffold: DemographicScaffold, data: pd.DataFrame, con
     else:
         sample = data.reset_index(drop=True)
     climate = scaffold.climate_scores(sample)
-    young_weight = np.sqrt(np.clip(sample.young_area_precision.to_numpy(float), 0.5, 2.0))
-    mature_weight = np.sqrt(np.clip(sample.mature_area_precision.to_numpy(float), 0.5, 2.0))
+    profile_weight_u, profile_weight_v, _ = cross_fitted_estimation_weights(sample, config, config.seed + 9110100)
+    young_weight = np.sqrt(np.maximum(profile_weight_u, 1e-12))
+    mature_weight = np.sqrt(np.maximum(profile_weight_v, 1e-12))
     young_scale = np.std(sample.delta_u_log.to_numpy(float)) + 0.10
     mature_scale = np.std(sample.delta_v_log.to_numpy(float)) + 0.05
     lower = np.array([-8, -3, -3, -8, -3, -3, -8, -3, -3, -6, -6, -8, -8], dtype=float)
@@ -2663,9 +3048,8 @@ def ode_identifiability(scaffold: DemographicScaffold, data: pd.DataFrame, confi
 
     singular, largest, smallest, condition, effective_rank, correlation = decomposition(matrix)
     if stochastic is not None:
-        dt = sample.dt_years.to_numpy(float)
-        variance_u = stochastic["sigma_young"] ** 2 * dt + stochastic["observation_scale_young"] ** 2 / (sample.young_count_t1.to_numpy(float) + 0.5)
-        variance_v = stochastic["sigma_mature"] ** 2 * dt + stochastic["observation_scale_mature"] ** 2 / (sample.mature_count_t1.to_numpy(float) + 0.5)
+        reference_components = persistence_reference_components(sample)
+        variance_u, variance_v = predictive_variance_from_components(sample, reference_components, stochastic, config)
         weighted_matrix = np.vstack([jac_u / np.sqrt(np.maximum(variance_u, 1e-10))[:, None], jac_v / np.sqrt(np.maximum(variance_v, 1e-10))[:, None]])
     else:
         weighted_matrix = matrix.copy()
@@ -2708,7 +3092,8 @@ def site_bootstrap_scaffold(data: pd.DataFrame, reference_scaffold: DemographicS
             pieces.append(piece)
         sample = pd.concat(pieces, ignore_index=True)
         try:
-            fitted = DemographicScaffold.fit(sample, config, config.seed + 9200000 + bootstrap * 37, reference_scaffold.use_climate, True, climate_override=None, multistart_override=config.scaffold_bootstrap_multistart, max_nfev_override=config.scaffold_bootstrap_max_nfev)
+            weight_u, weight_v, _ = cross_fitted_estimation_weights(sample, config, config.seed + 9250000 + bootstrap * 41)
+            fitted = DemographicScaffold.fit(sample, config, config.seed + 9200000 + bootstrap * 37, reference_scaffold.use_climate, False, climate_override=None, multistart_override=config.scaffold_bootstrap_multistart, max_nfev_override=config.scaffold_bootstrap_max_nfev, sample_weight_young=weight_u, sample_weight_mature=weight_v)
         except Exception:
             continue
         for index, (name, estimate) in enumerate(zip(names, fitted.parameters)):
@@ -2775,7 +3160,7 @@ def derivative_bootstrap_stability(data: pd.DataFrame, spec: ModelSpec, hyper: H
     return draws, pd.DataFrame(summaries)
 
 def surrogate_matrix(frame: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
-    names = ["u0_log", "v0_log", "log_dt", "event_year", "decimalLatitude", "decimalLongitude", "young_baseline_area_precision", "mature_baseline_area_precision", "young_baseline_area_missing", "mature_baseline_area_missing", "zero_u0", "zero_v0", *RAW_CLIMATE_MODEL]
+    names = ["u0_log", "v0_log", "log_dt", "target_year", "decimalLatitude", "decimalLongitude", "young_baseline_area_precision", "mature_baseline_area_precision", "young_baseline_area_missing", "mature_baseline_area_missing", "zero_u0", "zero_v0"]
     x = frame[names].to_numpy(float)
     x[:, 3] -= np.mean(x[:, 3])
     return x, names
@@ -2893,6 +3278,10 @@ def run_repeated_holdouts(data: pd.DataFrame, config: Configuration) -> pd.DataF
                 "test_sites": test.siteID.nunique(),
                 "selected_gate": hyper.gate,
                 "selected_ridge_scale": hyper.ridge_scale,
+                "selected_distillation_weight": hyper.distillation_weight,
+                "selected_occurrence_gate": hyper.occurrence_gate,
+                "selected_gamma_scale": hyper.gamma_scale,
+                "selected_kernel_alpha": hyper.kernel_alpha,
                 "RMSE_log1p": rmse,
                 "Persistence_RMSE_log1p": reference,
                 "RMSE_skill": 1.0 - rmse / reference if reference > 1e-12 else np.nan,
@@ -2928,7 +3317,7 @@ def evaluate_train_test_split(train: pd.DataFrame, test: pd.DataFrame, split_lab
             reference = float(np.sqrt(mean_squared_error(y, persistence)))
             covered = (y >= prediction[f"lower_{key}_log"].to_numpy(float)) & (y <= prediction[f"upper_{key}_log"].to_numpy(float))
             site_coverage = pd.DataFrame({"siteID": test.siteID.astype(str), "covered": covered}).groupby("siteID").covered.agg(["mean", "all"])
-            rows.append({"split_type": split_type, "split_label": split_label, "model": spec.name, "stage": stage, "train_rows": len(train), "test_rows": len(test), "train_sites": int(train.siteID.nunique()), "core_sites": int(core.siteID.nunique()), "calibration_sites": int(calibration.siteID.nunique()), "test_sites": int(test.siteID.nunique()), "selected_gate": hyper.gate, "selected_ridge_scale": hyper.ridge_scale, "RMSE_log1p": rmse, "Persistence_RMSE_log1p": reference, "RMSE_skill": 1.0 - rmse / reference if reference > 1e-12 else np.nan, "MAE_log1p": float(mean_absolute_error(y, point)), "Spearman": safe_spearman(y, point), "transition_coverage": float(np.mean(covered)), "mean_site_coverage": float(site_coverage["mean"].mean()), "simultaneous_site_coverage": float(site_coverage["all"].mean()), "mean_interval_width": float(np.mean(prediction[f"upper_{key}_log"].to_numpy(float) - prediction[f"lower_{key}_log"].to_numpy(float))), "stochastic_calibration_site_overlap": len(set(state.stochastic_source_sites) & set(state.calibration_sites))})
+            rows.append({"split_type": split_type, "split_label": split_label, "model": spec.name, "stage": stage, "train_rows": len(train), "test_rows": len(test), "train_sites": int(train.siteID.nunique()), "core_sites": int(core.siteID.nunique()), "calibration_sites": int(calibration.siteID.nunique()), "test_sites": int(test.siteID.nunique()), "selected_gate": hyper.gate, "selected_ridge_scale": hyper.ridge_scale, "selected_distillation_weight": hyper.distillation_weight, "selected_occurrence_gate": hyper.occurrence_gate, "selected_gamma_scale": hyper.gamma_scale, "selected_kernel_alpha": hyper.kernel_alpha, "RMSE_log1p": rmse, "Persistence_RMSE_log1p": reference, "RMSE_skill": 1.0 - rmse / reference if reference > 1e-12 else np.nan, "MAE_log1p": float(mean_absolute_error(y, point)), "Spearman": safe_spearman(y, point), "transition_coverage": float(np.mean(covered)), "mean_site_coverage": float(site_coverage["mean"].mean()), "simultaneous_site_coverage": float(site_coverage["all"].mean()), "mean_interval_width": float(np.mean(prediction[f"upper_{key}_log"].to_numpy(float) - prediction[f"lower_{key}_log"].to_numpy(float))), "stochastic_calibration_site_overlap": len(set(state.stochastic_source_sites) & set(state.calibration_sites))})
     return pd.DataFrame(rows)
 
 def run_temporal_validation(data: pd.DataFrame, config: Configuration) -> pd.DataFrame:
@@ -2998,8 +3387,11 @@ def fit_final_deployment(data: pd.DataFrame, config: Configuration) -> tuple[TRA
 
 def numerical_audit(model: TRACEModel, data: pd.DataFrame, cv_audit: pd.DataFrame, config: Configuration) -> pd.DataFrame:
     components = model.components(data)
-    point_coherence_u = float(np.max(np.abs(components["pred_u"] - components["positive_probability_u"] * components["magnitude_u"])))
-    point_coherence_v = float(np.max(np.abs(components["pred_v"] - components["positive_probability_v"] * components["magnitude_v"])))
+    h = model.hyper.occurrence_gate if model.occurrence is not None else 0.0
+    expected_u = (1.0 - h) * components["magnitude_u"] + h * components["hurdle_original_log_u"]
+    expected_v = (1.0 - h) * components["magnitude_v"] + h * components["hurdle_original_log_v"]
+    point_coherence_u = float(np.max(np.abs(components["pred_u"] - expected_u)))
+    point_coherence_v = float(np.max(np.abs(components["pred_v"] - expected_v)))
     if model.scaffold is not None:
         coarse_u, coarse_v = model.scaffold.predict(data, steps=config.integration_steps)
         fine_u, fine_v = model.scaffold.predict(data, steps=config.integration_steps * 2)
@@ -3019,54 +3411,78 @@ def numerical_audit(model: TRACEModel, data: pd.DataFrame, cv_audit: pd.DataFram
         {"item": "kernel_centers", "value": int(len(model.discrepancy.centers))},
         {"item": "selected_gate", "value": model.hyper.gate},
         {"item": "selected_ridge_scale", "value": model.hyper.ridge_scale},
+        {"item": "selected_distillation_weight", "value": model.hyper.distillation_weight},
+        {"item": "selected_occurrence_gate", "value": model.hyper.occurrence_gate},
+        {"item": "selected_gamma_scale", "value": model.hyper.gamma_scale},
+        {"item": "selected_kernel_alpha", "value": model.hyper.kernel_alpha},
+        {"item": "variance_weight_crossfit_overlap_zero", "value": bool((model.estimation_weight_audit.get("site_overlap", pd.Series([0])).fillna(0).to_numpy(float) == 0).all()) if not model.estimation_weight_audit.empty else True},
     ]
     return pd.DataFrame(rows)
 
 def contribution_evidence(oof: pd.DataFrame, metrics: pd.DataFrame, paired: pd.DataFrame) -> pd.DataFrame:
     comparisons = [
-        ("scaffold", "Discrepancy only, independently retuned"),
-        ("teacher", "Without teacher smoothing"),
-        ("climate", "Without realized climate"),
-        ("coordinates", "Without coordinates"),
-        ("precision", "Without sampling precision"),
-        ("occurrence", "Without occurrence hurdle"),
+        ("scaffold", "Discrepancy only, independently retuned", "removal"),
+        ("teacher", "Without teacher smoothing", "removal"),
+        ("realized_climate", "Without realized climate", "removal"),
+        ("coordinates", "Without coordinates", "removal"),
+        ("variance_weighting", "Without variance-aware estimation", "removal"),
+        ("sampling_precision_predictors", "Without sampling-precision predictors", "removal"),
+        ("sampling_support", "Without sampling support information", "removal"),
+        ("occurrence", "Without occurrence layer", "removal"),
     ]
     rows = []
-    for component, comparison in comparisons:
+    for component, comparison, comparison_type in comparisons:
         for stage in ["young", "mature"]:
-            full = metrics[(metrics.model == primary_spec().name) & (metrics.stage == stage) & (metrics.metric == "RMSE_log1p")]
+            primary = metrics[(metrics.model == primary_spec().name) & (metrics.stage == stage) & (metrics.metric == "RMSE_log1p")]
             alternative = metrics[(metrics.model == comparison) & (metrics.stage == stage) & (metrics.metric == "RMSE_log1p")]
-            if full.empty or alternative.empty:
+            if primary.empty or alternative.empty:
                 continue
-            full_rmse = float(full.estimate.iloc[0])
-            comparison_rmse = float(alternative.estimate.iloc[0])
+            primary_rmse = float(primary.estimate.iloc[0])
+            alternative_rmse = float(alternative.estimate.iloc[0])
             paired_row = paired[(paired.stage == stage) & (paired.comparison_model == comparison)]
+            comparison_minus_primary = alternative_rmse - primary_rmse
+            if comparison_type == "removal":
+                component_gain = comparison_minus_primary
+                probability_supported = float(paired_row.probability_primary_better.iloc[0]) if not paired_row.empty else np.nan
+                ci_low = float(paired_row.CI_low.iloc[0]) if not paired_row.empty else np.nan
+                ci_high = float(paired_row.CI_high.iloc[0]) if not paired_row.empty else np.nan
+            else:
+                component_gain = -comparison_minus_primary
+                probability_supported = float(1.0 - paired_row.probability_primary_better.iloc[0]) if not paired_row.empty else np.nan
+                ci_low = -float(paired_row.CI_high.iloc[0]) if not paired_row.empty else np.nan
+                ci_high = -float(paired_row.CI_low.iloc[0]) if not paired_row.empty else np.nan
             rows.append({
                 "component": component,
                 "stage": stage,
-                "full_RMSE": full_rmse,
-                "comparison_RMSE": comparison_rmse,
-                "RMSE_gain_comparison_minus_full": comparison_rmse - full_rmse,
-                "relative_gain_vs_comparison": 1.0 - full_rmse / comparison_rmse if comparison_rmse > 0 else np.nan,
-                "CI_low": float(paired_row.CI_low.iloc[0]) if not paired_row.empty else np.nan,
-                "CI_high": float(paired_row.CI_high.iloc[0]) if not paired_row.empty else np.nan,
-                "bootstrap_probability_full_better": float(paired_row.probability_primary_better.iloc[0]) if not paired_row.empty else np.nan,
+                "comparison_type": comparison_type,
+                "primary_RMSE": primary_rmse,
+                "comparison_RMSE": alternative_rmse,
+                "component_RMSE_gain": component_gain,
+                "RMSE_gain_comparison_minus_primary": comparison_minus_primary,
+                "relative_component_gain": component_gain / primary_rmse if primary_rmse > 0 else np.nan,
+                "CI_low": ci_low,
+                "CI_high": ci_high,
+                "bootstrap_probability_component_supported": probability_supported,
+                "bootstrap_probability_primary_better": float(paired_row.probability_primary_better.iloc[0]) if not paired_row.empty else np.nan,
                 "site_equal_MSE_signflip_p": float(paired_row.site_equal_MSE_signflip_p.iloc[0]) if not paired_row.empty else np.nan,
-                "comparison_independently_retuned": True,
+                "comparison_independently_refit_and_retuned": True,
             })
     for stage, key in [("young", "u"), ("mature", "v")]:
         rows.append({
             "component": "magnitude_decomposition",
             "stage": stage,
-            "full_RMSE": np.nan,
+            "comparison_type": "diagnostic",
+            "primary_RMSE": np.nan,
             "comparison_RMSE": np.nan,
-            "RMSE_gain_comparison_minus_full": float(np.mean(np.abs(oof[f"gated_scaffold_{key}_log"]))),
-            "relative_gain_vs_comparison": float(np.mean(np.abs(oof[f"discrepancy_{key}_log"]))),
+            "component_RMSE_gain": float(np.mean(np.abs(oof[f"gated_scaffold_{key}_log"]))),
+            "RMSE_gain_comparison_minus_primary": float(np.mean(np.abs(oof[f"gated_scaffold_{key}_log"]))),
+            "relative_component_gain": float(np.mean(np.abs(oof[f"discrepancy_{key}_log"]))),
             "CI_low": np.nan,
             "CI_high": np.nan,
-            "bootstrap_probability_full_better": np.nan,
+            "bootstrap_probability_component_supported": np.nan,
+            "bootstrap_probability_primary_better": np.nan,
             "site_equal_MSE_signflip_p": np.nan,
-            "comparison_independently_retuned": True,
+            "comparison_independently_refit_and_retuned": True,
         })
     return pd.DataFrame(rows)
 
@@ -3078,14 +3494,15 @@ def research_gap_evidence(metrics: pd.DataFrame, contribution: pd.DataFrame, reg
         if not full.empty and not persistence.empty:
             skill = 1.0 - float(full.estimate.iloc[0]) / float(persistence.estimate.iloc[0])
             rows.append({"question": "unseen-site transition prediction", "stage": stage, "estimate": skill, "status": "supported" if skill > 0.05 else "weak", "statement": f"Site-excluded RMSE skill over persistence was {skill:.1%}."})
-        for component in ["scaffold", "precision", "teacher", "climate", "coordinates", "occurrence"]:
+        for component in ["scaffold", "teacher", "realized_climate", "coordinates", "variance_weighting", "sampling_precision_predictors", "sampling_support", "occurrence"]:
             row = contribution[(contribution.component == component) & (contribution.stage == stage)]
             if row.empty:
                 continue
-            gain = float(row.RMSE_gain_comparison_minus_full.iloc[0])
-            probability = float(row.bootstrap_probability_full_better.iloc[0])
+            gain = float(row.component_RMSE_gain.iloc[0])
+            probability = float(row.bootstrap_probability_component_supported.iloc[0])
             status = "supported" if gain > 0 and probability >= 0.95 else "not_supported"
-            rows.append({"question": f"incremental predictive value of {component}", "stage": stage, "estimate": gain, "status": status, "statement": f"Independently retuned removal changed RMSE by {gain:.4f}; bootstrap probability that the full model was better was {probability:.3f}."})
+            comparison_type = str(row.comparison_type.iloc[0])
+            rows.append({"question": f"incremental predictive value of {component}", "stage": stage, "estimate": gain, "status": status, "statement": f"The independently refit and retuned {comparison_type} comparison implied an RMSE gain of {gain:.4f}; bootstrap support probability was {probability:.3f}."})
         regime = regimes[(regimes.stage == stage) & (regimes.regime == "zero_to_positive")]
         if not regime.empty:
             skill = float(regime.skill_vs_persistence.iloc[0])
@@ -3195,16 +3612,20 @@ def build_summary(data: pd.DataFrame, metrics: pd.DataFrame, site_equal: pd.Data
 
 def model_card(config: Configuration) -> pd.DataFrame:
     statements = [
-        ("Scope", "Conditional next-census prediction of two sampling-defined density strata under complete-site exclusion."),
-        ("Point estimand", "The primary log-scale point prediction is the hurdle expectation p(x) times the conditional positive-state log magnitude, matching squared-error evaluation on log(1+density)."),
+        ("Scope", "Primary next-census prediction uses baseline state, known forecast horizon, coordinates and reconstructed baseline sampling support under complete-site exclusion; realized interval climate is evaluated only as a secondary conditional extension."),
+        ("Point estimand", "The point estimator interpolates between conditional positive-state log magnitude and the log transform of the original-scale hurdle mean through a grouped-CV-selected occurrence gate h."),
+        ("Distribution estimand", "The predictive distribution retains the full calibrated hurdle representation; its log-scale expectation p(x)m(x) is kept distinct from the RMSE-oriented point estimator."),
         ("Demographic scaffold", "A non-negative two-state ODE provides a constrained structural reference; its parameters are treated as descriptive rather than causal demographic rates."),
         ("Discrepancy", "A sparse multi-scale Gaussian RBF residual model is fitted directly to the gated scaffold residual and exposes exact gradients and Hessian diagnostics."),
-        ("Ablations", "Every TRACE ablation is independently grouped-tuned and independently refitted inside each outer training fold."),
-        ("Occurrence", "Site-grouped cross-fitted Extra Trees probabilities are calibrated by isotonic regression or Platt scaling and define a coherent hurdle endpoint distribution."),
+        ("Hyperparameter selection", "Mechanistic gate, ridge scale, teacher distillation weight, occurrence-to-point gate, RBF gamma scale and two-kernel mixture weight are selected by prespecified staged grouped inner cross-validation within each development split."),
+        ("Feature geometry", "Standardized predictor dimensions receive neutral unit weights; kernel mixture weights are selected rather than hand assigned."),
+        ("Estimation weighting", "Primary mean-model estimation uses cross-fitted feasible inverse-variance weights based on the same process-plus-expected-count variance form, with a persistence reference and site-excluded weight construction."),
+        ("Ablations", "Every TRACE comparison is independently refitted and the applicable prespecified tuning dimensions are reselected inside each outer training fold."),
+        ("Occurrence", "Site-grouped cross-fitted Extra Trees probabilities are calibrated by isotonic regression or Platt scaling and are evaluated with discrimination, proper probability scores and calibration diagnostics."),
         ("Uncertainty", "Endpoint-noise Monte Carlo distributions combine process-scale variation, expected-count observation variation, cross-stratum dependence and occurrence uncertainty, then receive site-aware split-conformal adjustment."),
-        ("SDE sensitivity", "A log-state stochastic version of the demographic scaffold diffuses white process noise inside the dynamics and is evaluated as a sensitivity model using proper distributional scores."),
-        ("Inference", "Site bootstrap intervals are used for predictive contrasts and transition regimes; ODE parameters receive fixed-basis site-bootstrap uncertainty and Jacobian-SVD identifiability diagnostics."),
-        ("Residual diagnostics", "Standardized residual distribution, heteroskedasticity, PIT uniformity and within-plot lag dependence are audited instead of assuming white Gaussian noise without testing."),
+        ("SDE sensitivity", "Log-state and positive-state stochastic scaffold variants are retained as sensitivity models and are evaluated using proper distributional scores rather than treated as identified stochastic dynamics."),
+        ("Inference", "Site bootstrap intervals are used for predictive contrasts and transition regimes; ODE parameters receive site-bootstrap uncertainty and Jacobian-SVD identifiability diagnostics."),
+        ("Residual diagnostics", "Standardized residual distribution, heteroskedasticity, PIT behavior and within-plot lag dependence are audited instead of assuming white Gaussian noise without testing."),
         ("Calibration target", f"The configured conformal target is {config.conformal_mode}; transition-level calibration is not interpreted as simultaneous whole-site coverage unless site_max is used and empirically supported."),
         ("Not claimed", "The framework does not identify causal climate effects, does not establish unrestricted spatial extrapolation and does not validate recursive long-horizon dynamics from endpoint data alone."),
     ]
@@ -3486,6 +3907,8 @@ def main() -> None:
     regimes = transition_regime_analysis(oof, config)
     occurrence = occurrence_metrics(oof)
     reliability = occurrence_reliability(oof)
+    occurrence_calibration = occurrence_calibration_summary(oof)
+    support_sensitivity = zero_origin_support_sensitivity(oof, config)
     calibration = interval_calibration_diagnostics(oof, config)
     distribution = distribution_diagnostics(oof, config)
     pit_bins = pit_cluster_bins(oof, config)
@@ -3507,21 +3930,27 @@ def main() -> None:
     claims = paper_claims(evidence)
     runtime = time.time() - start
     summary = build_summary(data, metrics, site_equal, runtime)
-    descriptive = descriptive_statistics(data[[column for column in REQUIRED if column in data.columns] + ["u0_log", "v0_log", "u1_log", "v1_log", "delta_u_log", "delta_v_log", "log_dt"]])
+    descriptive = descriptive_statistics(data[[column for column in REQUIRED if column in data.columns] + ["target_year", "u0_log", "v0_log", "u1_log", "v1_log", "delta_u_log", "delta_v_log", "log_dt"]])
     site_descriptive = site_descriptive_statistics(data)
     zero_descriptive = zero_transition_statistics(data)
     data_dictionary = data_role_dictionary(data)
+    predictor_audit = predictor_availability_audit(data, final_model.spec, final_model.discrepancy.transform.feature_names)
     data_quality = data_quality_audit(data)
     missingness = missingness_audit(data)
     final_parameters = final_model.scaffold.parameter_table("final_deployment") if final_model.scaffold is not None else pd.DataFrame()
     final_rates = climate_rate_response(final_model.scaffold, "final_deployment") if final_model.scaffold is not None else pd.DataFrame()
     final_hessian = final_model.discrepancy.mean_abs_hessian_pairs(data.iloc[: min(len(data), config.derivative_reference_rows)].reset_index(drop=True), raw_scale=True)
+    code_path = Path(__file__).resolve()
+    temporal_status = {"requested": bool(config.temporal_validation_enabled), "completed": bool(not temporal.empty), "rows": int(len(temporal)), "reason": None if not temporal.empty else "no_eligible_split_or_insufficient_sites"}
+    spatiotemporal_status = {"requested": bool(config.temporal_validation_enabled and config.spatiotemporal_repeats > 0), "completed": bool(not spatiotemporal.empty), "rows": int(len(spatiotemporal)), "reason": None if not spatiotemporal.empty else "no_eligible_site_excluded_future_split_or_insufficient_sites"}
     run_audit = pd.DataFrame({
-        "item": ["model", "data", "sha256", "python", "numpy", "pandas", "scipy", "scikit_learn", "platform", "configuration", "final_spec", "final_hyperparameters", "teacher_occurrence_audit", "calibration"],
+        "item": ["model", "data", "data_sha256", "code", "code_sha256", "python", "numpy", "pandas", "scipy", "scikit_learn", "platform", "configuration", "final_spec", "final_hyperparameters", "teacher_occurrence_audit", "calibration", "forward_temporal_validation", "spatiotemporal_validation"],
         "value": [
             MODEL_NAME,
             str(data_path),
             sha256(data_path),
+            str(code_path),
+            sha256(code_path),
             sys.version,
             np.__version__,
             pd.__version__,
@@ -3533,6 +3962,8 @@ def main() -> None:
             json.dumps(jsonable(asdict(final_model.hyper)), ensure_ascii=False),
             json.dumps(jsonable(final_model.teacher_audit), ensure_ascii=False),
             json.dumps({"mode": final_calibration.mode, "q_young": final_calibration.conformal_q_young, "q_mature": final_calibration.conformal_q_mature, "calibration_sites": final_calibration.calibration_sites, "stochastic_source_sites": final_calibration.stochastic_source_sites}, ensure_ascii=False),
+            json.dumps(temporal_status, ensure_ascii=False),
+            json.dumps(spatiotemporal_status, ensure_ascii=False),
         ],
     })
     tables = {
@@ -3557,11 +3988,14 @@ def main() -> None:
         "Residual_Diagnostics": residual,
         "Occurrence_Metrics": occurrence,
         "Occurrence_Reliability": reliability,
+        "Occurrence_Calibration_Summary": occurrence_calibration,
+        "Zero_Origin_Support_Sensitivity": support_sensitivity,
         "TRACE_Tuning": evaluation["TRACE_Tuning"],
         "Benchmark_Tuning": evaluation["Benchmark_Tuning"],
         "Model_Selections": evaluation["Model_Selections"],
         "CV_Audit": evaluation["CV_Audit"],
         "Stochastic_Fit_Audit": evaluation["Stochastic_Fit_Audit"],
+        "Estimation_Weight_Audit": evaluation["Estimation_Weight_Audit"],
         "Parameter_Stability": stability,
         "Climate_Rate_Stability": climate,
         "ODE_Identifiability": identifiability["summary"],
@@ -3587,6 +4021,7 @@ def main() -> None:
         "Site_Descriptive": site_descriptive,
         "Zero_Transition_Statistics": zero_descriptive,
         "Data_Dictionary": data_dictionary,
+        "Predictor_Availability_Audit": predictor_audit,
         "Data_Quality_Audit": data_quality,
         "Missingness_Audit": missingness,
         "Final_Parameters": final_parameters,
@@ -3595,6 +4030,7 @@ def main() -> None:
         "Final_Tuning": final_tuning,
         "Final_Calibration_Scores": final_calibration.score_table,
         "Final_Stochastic_Fit_Audit": final_calibration.stochastic_audit,
+        "Final_Estimation_Weight_Audit": final_model.estimation_weight_audit,
         "OOF_Predictions": oof,
         "Final_Predictions": final_prediction,
         "Numerical_Audit": numerical,
@@ -3610,36 +4046,53 @@ def main() -> None:
         "model": final_model,
         "calibration": final_calibration,
         "data_sha256": sha256(data_path),
+        "code_sha256": sha256(code_path),
     }
-    joblib.dump(model_payload, out / "trace_model.joblib", compress=3)
-    (out / "paper_results.txt").write_text("\n".join(claims.claim.astype(str)), encoding="utf-8")
+    model_path = out / "trace_model.joblib"
+    paper_results_path = out / "paper_results.txt"
+    joblib.dump(model_payload, model_path, compress=3)
+    paper_results_path.write_text("\n".join(claims.claim.astype(str)), encoding="utf-8")
     manifest = {
         "model": MODEL_NAME,
         "data": str(data_path),
         "data_sha256": sha256(data_path),
+        "code": str(code_path),
+        "code_sha256": sha256(code_path),
+        "workbook_sha256": sha256(workbook),
+        "model_sha256": sha256(model_path),
+        "paper_results_sha256": sha256(paper_results_path),
         "configuration": jsonable(asdict(config)),
         "runtime_seconds": runtime,
+        "validation_status": {"forward_temporal": temporal_status, "spatiotemporal": spatiotemporal_status},
         "guarantees": {
             "site_blocked_outer_test": True,
             "calibration_sites_excluded_from_predictor_fit": True,
             "same_predictor_for_calibration_and_test": True,
-            "ablations_independently_tuned_and_refitted": True,
-            "coherent_log_scale_hurdle_point_estimand": True,
+            "applicable_prespecified_tuning_dimensions_reselected_for_each_trace_comparison": True,
+            "point_estimator_occurrence_adjustment_selected_inside_grouped_inner_cv": True,
+            "predictive_distribution_kept_distinct_from_rmse_oriented_point_estimator": True,
+            "inverse_variance_estimation_weights_cross_fitted_by_site": bool(final_model.spec.use_variance_weights),
+            "primary_model_uses_realized_interval_climate": bool(final_model.spec.use_climate),
+            "realized_climate_evaluated_as_primary_covariate": bool(final_model.spec.use_climate),
+            "no_realized_climate_ablation_completed": "pred_u_log__without_realized_climate" in oof.columns and "pred_v_log__without_realized_climate" in oof.columns,
+            "endpoint_year_excluded_from_predictor_feature_set": "event_year" not in final_model.discrepancy.transform.feature_names,
             "direct_residual_fit_to_gated_scaffold": True,
             "analytic_discrepancy_gradients": True,
             "analytic_discrepancy_hessian_diagnostics": True,
             "site_bootstrap_predictive_inference": True,
             "ode_site_bootstrap_refits_climate_basis": config.ode_bootstrap > 0,
             "ode_jacobian_svd_identifiability": True,
-            "ode_weighted_identifiability": True,
+            "ode_weighted_identifiability_uses_baseline_available_count_support": True,
             "ode_profile_objective_diagnostics": config.ode_profile_points >= 3,
-            "fully_nested_repeated_holdouts": config.repeated_holdouts > 0,
+            "fully_nested_repeated_holdouts_completed": bool(config.repeated_holdouts > 0 and not repeated.empty),
             "stochastic_parameters_estimated_without_conformal_labels": True,
             "candidate_gate_residual_refit_without_algebraic_shortcut": True,
             "cluster_aware_PIT_diagnostics_without_IID_KS_pvalue": True,
-            "forward_temporal_validation": config.temporal_validation_enabled,
-            "spatiotemporal_site_excluded_validation": config.temporal_validation_enabled and config.spatiotemporal_repeats > 0,
+            "forward_temporal_validation_completed": bool(not temporal.empty),
+            "spatiotemporal_site_excluded_validation_completed": bool(not spatiotemporal.empty),
             "baseline_sampling_precision_uses_reconstructed_t0_support_with_missingness_indicator": True,
+            "zero_origin_sampling_support_sensitivity_completed": bool(not support_sensitivity.empty),
+            "occurrence_calibration_summary_completed": bool(not occurrence_calibration.empty),
             "white_noise_residual_diagnostics": True,
             "embedded_log_diffusion_sensitivity": config.log_diffusion_enabled,
             "positive_state_diffusion_sensitivity": config.positive_diffusion_enabled,
